@@ -56,9 +56,12 @@ import android.graphics.Paint as NativePaint
 import android.graphics.Canvas as NativeCanvas
 import android.graphics.Paint.Cap
 import android.graphics.Paint.Join
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
+import androidx.compose.ui.layout.onSizeChanged
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -269,9 +272,42 @@ fun DrawingCanvas(
     var selectedStrokes by remember { mutableStateOf(emptyList<PenStroke>()) }
     var isDraggingSelection by remember { mutableStateOf(false) }
     var dragLastPosition by remember { mutableStateOf(Offset.Zero) }
+    var cacheBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var cacheCanvas by remember { mutableStateOf<android.graphics.Canvas?>(null) }
+    // state integer to force Compose to redraw when we mutate the bitmap
+    var cacheVersion by remember { mutableIntStateOf(0) }
+
+    // Helper function for full rebuilds (Eraser and Lasso pickup)
+    val rebuildCache: (List<PenStroke>) -> Unit = { strokes ->
+        cacheCanvas?.let { canvas ->
+            // Clear the bitmap completely
+            canvas.drawColor(android.graphics.Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
+            // Redraw all remaining strokes
+            strokes.forEach { stroke ->
+                canvas.save()
+                canvas.translate(stroke.minX, stroke.minY)
+                canvas.drawPicture(stroke.picture)
+                canvas.restore()
+            }
+            cacheVersion++ // Trigger UI update
+        }
+    }
     Canvas(
         modifier = Modifier
             .fillMaxSize()
+            .onSizeChanged { size ->
+                if (size.width > 0 && size.height > 0) {
+                    // Create a mutable Android Bitmap
+                    val androidBmp = android.graphics.Bitmap.createBitmap(
+                        size.width, size.height, android.graphics.Bitmap.Config.ARGB_8888
+                    )
+                    cacheBitmap = androidBmp.asImageBitmap()
+                    cacheCanvas = android.graphics.Canvas(androidBmp)
+
+                    // If there are already strokes (e.g., on device rotation), draw them
+                    rebuildCache(completedStrokes)
+                }
+            }
             .pointerInput(Unit){
                 awaitPointerEventScope {
                     while(true){
@@ -333,8 +369,17 @@ fun DrawingCanvas(
                     }
                     // clear lasso if they tapped outside regardless of what tool is selected
                     if (selectedStrokes.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
-                        // tapped outside, commit ink back to canvas
+                        // tapped outside, commit ink back to bitmap
                         if (selectedStrokes.isNotEmpty()) {
+                            cacheCanvas?.let { canvas ->
+                                selectedStrokes.forEach { stroke ->
+                                    canvas.save()
+                                    canvas.translate(stroke.minX, stroke.minY)
+                                    canvas.drawPicture(stroke.picture)
+                                    canvas.restore()
+                                }
+                                cacheVersion++
+                            }
                             completedStrokes = completedStrokes + selectedStrokes
                             selectedStrokes = emptyList()
                         }
@@ -389,12 +434,17 @@ fun DrawingCanvas(
                                 }
                             }
                             else if (currentTool == ActiveTool.ERASESTROKE) {
-                                // Eraser Logic: Find any stroke that has a point within 50 pixels of the eraser touch
+                                // Check with vectors if user is touching a stroke, if so, rebuild bitmap
                                 val eraserRadius = 50f
-                                completedStrokes = completedStrokes.filterNot { stroke ->
+                                val oldSize = completedStrokes.size
+                                completedStrokes = completedStrokes.filterNot { stroke -> //see if user is touching any strokes
                                     stroke.points.any { point ->
                                         (point.offset - change.position).getDistance() < eraserRadius
                                     }
+                                }
+                                // If we actually deleted something, rebuild the cache
+                                if (completedStrokes.size != oldSize) {
+                                    rebuildCache(completedStrokes)
                                 }
                             } else if (currentTool == ActiveTool.LASSO) {
                                 if (isDraggingSelection) {
@@ -454,6 +504,12 @@ fun DrawingCanvas(
                         // 3. Update the state
                         selectedStrokes = selectedStrokes + newlySelected
                         completedStrokes = unselected
+
+                        // If we successfully picked something up off the canvas, rebuild the cache without it
+                        if (newlySelected.isNotEmpty()) {
+                            rebuildCache(completedStrokes)
+                        }
+
                         if (selectedStrokes.isEmpty()){
                             lassoPath = emptyList()
                         }
@@ -534,6 +590,14 @@ fun DrawingCanvas(
                             color = pencolor,
                             minX = minX, minY = minY, maxX = maxX, maxY = maxY
                         )
+                        cacheCanvas?.let { canvas ->
+                            canvas.save()
+                            canvas.translate(newStroke.minX, newStroke.minY)
+                            canvas.drawPicture(newStroke.picture)
+                            canvas.restore()
+                            cacheVersion++
+                        }
+
                         completedStrokes = completedStrokes + newStroke
                         currentRawStroke = emptyList()
                     }
@@ -541,19 +605,15 @@ fun DrawingCanvas(
             }
     ) {
         // Draw the strokes
-        // efficient displaying with picture for completed strokes
+        // efficient displaying with bitmap for completed strokes
 
-            // Use drawIntoCanvas to access the lower-level native drawing tools
-        drawIntoCanvas { canvas ->
-            completedStrokes.forEach { stroke ->
-                canvas.save()
-
-                canvas.translate(stroke.minX, stroke.minY)
-
-                canvas.nativeCanvas.drawPicture(stroke.picture)
-
-                canvas.restore()
-            }
+        cacheBitmap?.let { bmp ->
+            // We read cacheVersion so Compose knows to redraw when it changes
+            val trigger = cacheVersion
+            drawImage(
+                image = bmp,
+                topLeft = Offset.Zero
+            )
         }
         // less efficient drawing with points for current stroke
         if (currentRawStroke.isNotEmpty()) {
@@ -565,9 +625,7 @@ fun DrawingCanvas(
             val currentStroke = PenStroke(strokeToDraw, thickness, pencolor, Picture(), 0f, 0f, 0f, 0f) //create temp stroke with empty pic to pass to drawStroke
             drawStroke(currentStroke, thickness)
         }
-        //selected strokes also use optimized picture movement
-
-            // Use drawIntoCanvas to access the lower-level native drawing tools
+        //selected strokes use more optimized picture movement, but not as optimized as bitmap
         drawIntoCanvas { canvas ->
             selectedStrokes.forEach { stroke ->
                 canvas.save()
