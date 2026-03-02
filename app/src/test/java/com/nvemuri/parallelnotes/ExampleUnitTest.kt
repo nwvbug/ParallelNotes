@@ -1,4 +1,4 @@
-package com.example.pentest
+package com.nvemuri.parallelnotes
 
 import org.junit.Test
 

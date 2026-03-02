@@ -1,4 +1,4 @@
-package com.example.pentest.ui.theme
+package com.nvemuri.parallelnotes.ui.theme
 
 import androidx.compose.ui.graphics.Color
 

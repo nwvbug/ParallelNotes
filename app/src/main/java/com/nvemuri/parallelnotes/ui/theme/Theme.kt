@@ -1,6 +1,5 @@
-package com.example.pentest.ui.theme
+package com.nvemuri.parallelnotes.ui.theme
 
-import android.app.Activity
 import android.os.Build
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.material3.MaterialTheme

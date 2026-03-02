@@ -19,5 +19,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Pen Test"
+rootProject.name = "Parallel Notes"
 include(":app")
