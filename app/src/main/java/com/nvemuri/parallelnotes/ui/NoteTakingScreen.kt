@@ -41,15 +41,12 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
-import androidx.compose.ui.graphics.StrokeCap
-import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.layout.ContentScale
 import com.nvemuri.parallelnotes.R
-import com.nvemuri.parallelnotes.utils.PenStroke
-import com.nvemuri.parallelnotes.utils.Point
+import com.nvemuri.parallelnotes.data.entities.PenStroke
+import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.utils.bezierSmoothStroke
 import com.nvemuri.parallelnotes.utils.drawStroke
-import com.nvemuri.parallelnotes.utils.generatePathFromPoints
 import com.nvemuri.parallelnotes.utils.isPointInPolygon
 import android.graphics.Picture
 import android.graphics.Paint as NativePaint
@@ -261,7 +258,7 @@ fun DrawingCanvas(
     removeJitterAmount: Float
 ) {
     //Drawing States
-    var completedStrokes by remember { mutableStateOf(emptyList<PenStroke>()) }
+    var canvasElements by remember { mutableStateOf(emptyList<PenStroke>()) } //change this to emptyList CanvasElement later
     var currentRawStroke by remember { mutableStateOf(emptyList<Point>())}
 
     //Cursor State
@@ -269,7 +266,7 @@ fun DrawingCanvas(
 
     //Lasso States
     var lassoPath  by remember {mutableStateOf(emptyList<Offset>())}
-    var selectedStrokes by remember { mutableStateOf(emptyList<PenStroke>()) }
+    var selectedElements by remember { mutableStateOf(emptyList<PenStroke>()) }
     var isDraggingSelection by remember { mutableStateOf(false) }
     var dragLastPosition by remember { mutableStateOf(Offset.Zero) }
     var cacheBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
@@ -305,7 +302,7 @@ fun DrawingCanvas(
                     cacheCanvas = android.graphics.Canvas(androidBmp)
 
                     // If there are already strokes (e.g., on device rotation), draw them
-                    rebuildCache(completedStrokes)
+                    rebuildCache(canvasElements)
                 }
             }
             .pointerInput(Unit){
@@ -358,7 +355,7 @@ fun DrawingCanvas(
                     //determining what theyre doing if its lasso
                     if (currentTool == ActiveTool.LASSO) {
                         // Check if they tapped inside an active selection
-                        if (selectedStrokes.isNotEmpty() && isPointInPolygon(
+                        if (selectedElements.isNotEmpty() && isPointInPolygon(
                                 virtualBrush,
                                 lassoPath
                             )
@@ -368,11 +365,11 @@ fun DrawingCanvas(
                         }
                     }
                     // clear lasso if they tapped outside regardless of what tool is selected
-                    if (selectedStrokes.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
+                    if (selectedElements.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
                         // tapped outside, commit ink back to bitmap
-                        if (selectedStrokes.isNotEmpty()) {
+                        if (selectedElements.isNotEmpty()) {
                             cacheCanvas?.let { canvas ->
-                                selectedStrokes.forEach { stroke ->
+                                selectedElements.forEach { stroke ->
                                     canvas.save()
                                     canvas.translate(stroke.minX, stroke.minY)
                                     canvas.drawPicture(stroke.picture)
@@ -380,8 +377,8 @@ fun DrawingCanvas(
                                 }
                                 cacheVersion++
                             }
-                            completedStrokes = completedStrokes + selectedStrokes
-                            selectedStrokes = emptyList()
+                            canvasElements = canvasElements + selectedElements
+                            selectedElements = emptyList()
                         }
                         // Start a fresh lasso path
                         isDraggingSelection = false
@@ -436,15 +433,15 @@ fun DrawingCanvas(
                             else if (currentTool == ActiveTool.ERASESTROKE) {
                                 // Check with vectors if user is touching a stroke, if so, rebuild bitmap
                                 val eraserRadius = 50f
-                                val oldSize = completedStrokes.size
-                                completedStrokes = completedStrokes.filterNot { stroke -> //see if user is touching any strokes
+                                val oldSize = canvasElements.size
+                                canvasElements = canvasElements.filterNot { stroke -> //see if user is touching any strokes
                                     stroke.points.any { point ->
                                         (point.offset - change.position).getDistance() < eraserRadius
                                     }
                                 }
                                 // If we actually deleted something, rebuild the cache
-                                if (completedStrokes.size != oldSize) {
-                                    rebuildCache(completedStrokes)
+                                if (canvasElements.size != oldSize) {
+                                    rebuildCache(canvasElements)
                                 }
                             } else if (currentTool == ActiveTool.LASSO) {
                                 if (isDraggingSelection) {
@@ -453,19 +450,8 @@ fun DrawingCanvas(
                                     val dy = change.position.y - dragLastPosition.y
 
                                     // Translate all selected strokes to new location
-                                    selectedStrokes = selectedStrokes.map { stroke ->
-                                        PenStroke(
-                                            points = stroke.points.map { point ->
-                                                Point(Offset(point.offset.x + dx, point.offset.y + dy), point.pressure)
-                                            },
-                                            thickness = stroke.thickness,
-                                            color = stroke.color,
-                                            picture = stroke.picture,
-                                            minX = stroke.minX + dx,
-                                            maxX = stroke.maxX + dx,
-                                            minY = stroke.minY + dy,
-                                            maxY = stroke.maxY + dy
-                                        )
+                                    selectedElements = selectedElements.map { element ->
+                                        element.translate(dx, dy)
                                     }
 
                                     // Translate the lasso path so the lasso moves with the ink
@@ -488,7 +474,7 @@ fun DrawingCanvas(
                         val newlySelected = mutableListOf<PenStroke>()
                         val unselected = mutableListOf<PenStroke>()
 
-                        for (stroke in completedStrokes) {
+                        for (stroke in canvasElements) {
                             // If at least one point in the stroke is inside the lasso, select the whole stroke
                             val isSelected = stroke.points.any { point ->
                                 isPointInPolygon(point.offset, lassoPath)
@@ -502,15 +488,15 @@ fun DrawingCanvas(
                         }
 
                         // 3. Update the state
-                        selectedStrokes = selectedStrokes + newlySelected
-                        completedStrokes = unselected
+                        selectedElements = selectedElements + newlySelected
+                        canvasElements = unselected
 
                         // If we successfully picked something up off the canvas, rebuild the cache without it
                         if (newlySelected.isNotEmpty()) {
-                            rebuildCache(completedStrokes)
+                            rebuildCache(canvasElements)
                         }
 
-                        if (selectedStrokes.isEmpty()){
+                        if (selectedElements.isEmpty()){
                             lassoPath = emptyList()
                         }
                         //lassoPath = emptyList() // Clear the lasso line from the screen
@@ -598,7 +584,7 @@ fun DrawingCanvas(
                             cacheVersion++
                         }
 
-                        completedStrokes = completedStrokes + newStroke
+                        canvasElements = canvasElements + newStroke
                         currentRawStroke = emptyList()
                     }
                 }
@@ -622,12 +608,12 @@ fun DrawingCanvas(
             } else {
                 currentRawStroke
             }
-            val currentStroke = PenStroke(strokeToDraw, thickness, pencolor, Picture(), 0f, 0f, 0f, 0f) //create temp stroke with empty pic to pass to drawStroke
+            val currentStroke = PenStroke(points=strokeToDraw, thickness=thickness, color=pencolor, picture=Picture(), minX=0f, minY=0f, maxX=0f, maxY=0f) //create temp stroke with empty pic to pass to drawStroke
             drawStroke(currentStroke, thickness)
         }
         //selected strokes use more optimized picture movement, but not as optimized as bitmap
         drawIntoCanvas { canvas ->
-            selectedStrokes.forEach { stroke ->
+            selectedElements.forEach { stroke ->
                 canvas.save()
 
                 canvas.translate(stroke.minX, stroke.minY)

@@ -8,16 +8,10 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import com.nvemuri.parallelnotes.data.entities.Point
+import com.nvemuri.parallelnotes.data.entities.PenStroke
 
 // Data Models
-data class Point(val offset: Offset, val pressure: Float)
-data class PenStroke(
-    val points: List<Point>,
-    val thickness: Float,
-    val color: Color,
-    val picture: Picture,
-    val minX: Float, val maxX: Float, val minY: Float, val maxY: Float
-)
 
 // Drawing Functions
 fun DrawScope.drawStroke( //should ideally replace this entirely with drawpath eventually
