@@ -257,7 +257,7 @@ fun DrawingCanvas(
     smoothCurrentStroke: Boolean,
     removeJitterAmount: Float
 ) {
-    //Drawing States
+    //Drawing States (Vector)
     var canvasElements by remember { mutableStateOf(emptyList<PenStroke>()) } //change this to emptyList CanvasElement later
     var currentRawStroke by remember { mutableStateOf(emptyList<Point>())}
 
@@ -269,10 +269,15 @@ fun DrawingCanvas(
     var selectedElements by remember { mutableStateOf(emptyList<PenStroke>()) }
     var isDraggingSelection by remember { mutableStateOf(false) }
     var dragLastPosition by remember { mutableStateOf(Offset.Zero) }
-    var cacheBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var cacheCanvas by remember { mutableStateOf<android.graphics.Canvas?>(null) }
+
+    //Bitmap States
     // state integer to force Compose to redraw when we mutate the bitmap
     var cacheVersion by remember { mutableIntStateOf(0) }
+    var cacheBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
+    var cacheCanvas by remember { mutableStateOf<android.graphics.Canvas?>(null) }
+
+    //Eraser states
+    var erasedElements by remember {mutableStateOf(emptySet<PenStroke>())} //set for uniqueness of elements
 
     // Helper function for full rebuilds (Eraser and Lasso pickup)
     val rebuildCache: (List<PenStroke>) -> Unit = { strokes ->
@@ -433,16 +438,35 @@ fun DrawingCanvas(
                             else if (currentTool == ActiveTool.ERASESTROKE) {
                                 // Check with vectors if user is touching a stroke, if so, rebuild bitmap
                                 val eraserRadius = 50f
-                                val oldSize = canvasElements.size
-                                canvasElements = canvasElements.filterNot { stroke -> //see if user is touching any strokes
-                                    stroke.points.any { point ->
-                                        (point.offset - change.position).getDistance() < eraserRadius
-                                    }
+                                //EXPERIMENT instead of rebuilding the cache (laggy) what if we draw over with white
+                                // this should lower lag when there are a lot of strokes in the bitmap because the bitmap will only be edited once the user picks up the pen
+                                // need new remember called erased strokes and then will draw those in white, keep bitmap as is until user picks up pen
+
+                                val newlyErased = canvasElements.filter { element ->
+                                    element !in erasedElements &&
+                                            element is PenStroke && // Make sure we are looking at ink
+                                            element.points.any { point ->
+                                                (point.offset - change.position).getDistance() < eraserRadius
+                                            }
                                 }
-                                // If we actually deleted something, rebuild the cache
-                                if (canvasElements.size != oldSize) {
-                                    rebuildCache(canvasElements)
+
+                                if (newlyErased.isNotEmpty()) {
+                                    erasedElements = erasedElements + newlyErased
                                 }
+
+                                //BITMAP ERASE (SLOW)
+//                                val oldSize = canvasElements.size
+//                                canvasElements = canvasElements.filterNot { stroke -> //see if user is touching any strokes
+//                                    stroke.points.any { point ->
+//                                        (point.offset - change.position).getDistance() < eraserRadius
+//                                    }
+//                                }
+//                                // If we actually deleted something, rebuild the cache
+//                                if (canvasElements.size != oldSize) {
+//                                    rebuildCache(canvasElements)
+//
+//
+//                                }
                             } else if (currentTool == ActiveTool.LASSO) {
                                 if (isDraggingSelection) {
                                     // Calculate the distance moved since the last frame
@@ -468,9 +492,21 @@ fun DrawingCanvas(
                         }
                     } while (event.changes.any { it.pressed })
 
+                    // for eraser, check if there are erased strokes to do on penup
+                    if (currentTool == ActiveTool.ERASESTROKE && erasedElements.isNotEmpty()) {
+                        // Remove the erased elements from the main list
+                        canvasElements = canvasElements.filterNot { it in erasedElements }
+
+                        // Do the heavy cache rebuild once
+                        rebuildCache(canvasElements)
+
+                        // Clear the temp set
+                        erasedElements = emptySet()
+                    }
+
                     // FOR LASSO, CHECK IF THE USER CAPTURED ANYTHING
                     if (currentTool == ActiveTool.LASSO && lassoPath.isNotEmpty()) {
-                        // 2. Separate the strokes based on the Ray-Casting algorithm
+                        // Separate the strokes based on the Ray-Casting algorithm
                         val newlySelected = mutableListOf<PenStroke>()
                         val unselected = mutableListOf<PenStroke>()
 
@@ -487,7 +523,7 @@ fun DrawingCanvas(
                             }
                         }
 
-                        // 3. Update the state
+                        // Update the state
                         selectedElements = selectedElements + newlySelected
                         canvasElements = unselected
 
@@ -621,6 +657,28 @@ fun DrawingCanvas(
                 canvas.nativeCanvas.drawPicture(stroke.picture)
 
                 canvas.restore()
+            }
+        }
+
+        // in progress erasing: strokes already touched get rendered on top of in white until lift pen
+
+        // DRAW THE "WHITEOUT" OVER ERASED STROKES
+        if (erasedElements.isNotEmpty()) {
+            drawIntoCanvas { canvas ->
+                // Create a paint that forces all pixels to draw as background color
+                val whiteoutPaint = android.graphics.Paint().apply {
+                    colorFilter = android.graphics.PorterDuffColorFilter(
+                        android.graphics.Color.WHITE.toInt(), // will need to update if can change bg color
+                        android.graphics.PorterDuff.Mode.SRC_IN
+                    )
+                }
+
+                erasedElements.filterIsInstance<PenStroke>().forEach { stroke ->
+                    canvas.nativeCanvas.saveLayer(null, whiteoutPaint)
+                    canvas.nativeCanvas.translate(stroke.minX, stroke.minY)
+                    canvas.nativeCanvas.drawPicture(stroke.picture)
+                    canvas.nativeCanvas.restore()
+                }
             }
         }
 
