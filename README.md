@@ -1,3 +1,5 @@
+<img src="https://raw.githubusercontent.com/nwvbug/ParallelNotes/ea82d6575c1299d96d090cb80bc95dbf8260e47c/Assets/Parallel%20Notes%20Logo.svg" width="200">
+
 # Parallel Notes
 *A polished, smooth, and professional feeling notetaking app for Android.*
 
