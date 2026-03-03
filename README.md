@@ -1,6 +1,8 @@
 # Parallel Notes
-A polished, smooth, and professional feeling notetaking app for Android.
+*A polished, smooth, and professional feeling notetaking app for Android.*
+
 I have been an Android tablet user for school for a few years now, and while I enjoy the experience, I have noticed that many of the notetaking apps don't take advantage of most Android tablet capabilities.
+
 Unlike iPad tools, they seem to be targeted at the lowest common denominator of device. I want to build a polished notetaking app that takes full advantage of things like pressure sensitivity and pen tilt on higher-end tablets, without becoming a drawing app.
 
 ## Why is it better?
