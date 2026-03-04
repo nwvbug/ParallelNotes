@@ -2,6 +2,7 @@ package com.nvemuri.parallelnotes.utils
 
 import android.graphics.Picture
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.Path
@@ -10,8 +11,6 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.data.entities.PenStroke
-
-// Data Models
 
 // Drawing Functions
 fun DrawScope.drawStroke( //should ideally replace this entirely with drawpath eventually
@@ -164,4 +163,24 @@ fun generatePathFromPoints(points: List<Point>): Path {
         path.lineTo(points[i].offset.x, points[i].offset.y)
     }
     return path
+}
+
+
+// Chunking Functions
+// get which chunks a given canvaselem touches
+fun getOverlappingChunkKeys(bounds: Rect, CHUNK_SIZE: Int): List<String> {
+    val keys = mutableListOf<String>()
+
+    // Find the min and max chunk coordinates
+    val minGridX = (bounds.left / CHUNK_SIZE).toInt()
+    val minGridY = (bounds.top / CHUNK_SIZE).toInt()
+    val maxGridX = (bounds.right / CHUNK_SIZE).toInt()
+    val maxGridY = (bounds.bottom / CHUNK_SIZE).toInt()
+
+    for (x in minGridX..maxGridX) {
+        for (y in minGridY..maxGridY) {
+            keys.add("$x,$y")
+        }
+    }
+    return keys
 }

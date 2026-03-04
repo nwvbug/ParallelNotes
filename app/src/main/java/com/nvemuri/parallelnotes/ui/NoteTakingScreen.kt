@@ -48,11 +48,15 @@ import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.utils.bezierSmoothStroke
 import com.nvemuri.parallelnotes.utils.drawStroke
 import com.nvemuri.parallelnotes.utils.isPointInPolygon
+import com.nvemuri.parallelnotes.data.entities.CanvasElement
+import com.nvemuri.parallelnotes.utils.getOverlappingChunkKeys
+import com.nvemuri.parallelnotes.data.CanvasChunk
 import android.graphics.Picture
 import android.graphics.Paint as NativePaint
 import android.graphics.Canvas as NativeCanvas
 import android.graphics.Paint.Cap
 import android.graphics.Paint.Join
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -258,7 +262,7 @@ fun DrawingCanvas(
     removeJitterAmount: Float
 ) {
     //Drawing States (Vector)
-    var canvasElements by remember { mutableStateOf(emptyList<PenStroke>()) } //change this to emptyList CanvasElement later
+    var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) } //change this to emptyList CanvasElement later
     var currentRawStroke by remember { mutableStateOf(emptyList<Point>())}
 
     //Cursor State
@@ -266,50 +270,66 @@ fun DrawingCanvas(
 
     //Lasso States
     var lassoPath  by remember {mutableStateOf(emptyList<Offset>())}
-    var selectedElements by remember { mutableStateOf(emptyList<PenStroke>()) }
+    var selectedElements by remember { mutableStateOf(emptyList<CanvasElement>()) }
     var isDraggingSelection by remember { mutableStateOf(false) }
     var dragLastPosition by remember { mutableStateOf(Offset.Zero) }
 
     //Bitmap States
     // state integer to force Compose to redraw when we mutate the bitmap
     var cacheVersion by remember { mutableIntStateOf(0) }
-    var cacheBitmap by remember { mutableStateOf<ImageBitmap?>(null) }
-    var cacheCanvas by remember { mutableStateOf<android.graphics.Canvas?>(null) }
+    var activeChunks by remember { mutableStateOf(mutableMapOf<String, CanvasChunk>()) }
+    val CHUNK_SIZE = 512
 
-    //Eraser states
-    var erasedElements by remember {mutableStateOf(emptySet<PenStroke>())} //set for uniqueness of elements
 
-    // Helper function for full rebuilds (Eraser and Lasso pickup)
-    val rebuildCache: (List<PenStroke>) -> Unit = { strokes ->
-        cacheCanvas?.let { canvas ->
-            // Clear the bitmap completely
-            canvas.drawColor(android.graphics.Color.TRANSPARENT, android.graphics.PorterDuff.Mode.CLEAR)
-            // Redraw all remaining strokes
-            strokes.forEach { stroke ->
-                canvas.save()
-                canvas.translate(stroke.minX, stroke.minY)
-                canvas.drawPicture(stroke.picture)
-                canvas.restore()
+    // Helper function for rebuilding chunks
+    val rebuildTargetedChunks: (List<CanvasElement>, List<String>) -> Unit = { allElements, dirtyChunkKeys ->
+        dirtyChunkKeys.forEach { key ->
+            // Get the chunk (or create it if it doesn't exist yet)
+            val chunk = activeChunks.getOrPut(key) {
+                val parts = key.split(",")
+                CanvasChunk(parts[0].toInt(), parts[1].toInt(), CHUNK_SIZE)
             }
-            cacheVersion++ // Trigger UI update
+
+            // Clear this specific chunk
+            chunk.clear()
+
+            // Find ALL elements that overlap this chunk's bounding box and redraw them
+            allElements.forEach { element ->
+                if (element.boundingBox.overlaps(chunk.bounds)) {
+                    // have to shift the canvas negatively by the chunk's starting position so the stroke draws in the right local spot!
+                    chunk.canvas.save()
+                    chunk.canvas.translate(-chunk.bounds.left, -chunk.bounds.top)
+
+                    // Draw based on type
+                    when (element) {
+                        is PenStroke -> {
+                            chunk.canvas.translate(element.minX, element.minY)
+                            chunk.canvas.drawPicture(element.picture)
+                        }
+                        // is ImageElement -> ... (for later)
+                    }
+                    chunk.canvas.restore()
+                }
+            }
+        }
+        cacheVersion++ // Trigger Compose to re-render the chunks
+    }
+
+    LaunchedEffect(Unit) {
+        if (canvasElements.isNotEmpty() && activeChunks.isEmpty()) {
+            // Find every chunk that needs to exist
+            val allKeys = mutableSetOf<String>()
+            canvasElements.forEach { element ->
+                allKeys.addAll(getOverlappingChunkKeys(element.boundingBox, CHUNK_SIZE))
+            }
+            // Build them all at once
+            rebuildTargetedChunks(canvasElements, allKeys.toList())
         }
     }
+
     Canvas(
         modifier = Modifier
             .fillMaxSize()
-            .onSizeChanged { size ->
-                if (size.width > 0 && size.height > 0) {
-                    // Create a mutable Android Bitmap
-                    val androidBmp = android.graphics.Bitmap.createBitmap(
-                        size.width, size.height, android.graphics.Bitmap.Config.ARGB_8888
-                    )
-                    cacheBitmap = androidBmp.asImageBitmap()
-                    cacheCanvas = android.graphics.Canvas(androidBmp)
-
-                    // If there are already strokes (e.g., on device rotation), draw them
-                    rebuildCache(canvasElements)
-                }
-            }
             .pointerInput(Unit){
                 awaitPointerEventScope {
                     while(true){
@@ -371,17 +391,36 @@ fun DrawingCanvas(
                     }
                     // clear lasso if they tapped outside regardless of what tool is selected
                     if (selectedElements.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
-                        // tapped outside, commit ink back to bitmap
+
+                        // tapped outside, commit ink back to the chunks
                         if (selectedElements.isNotEmpty()) {
-                            cacheCanvas?.let { canvas ->
-                                selectedElements.forEach { stroke ->
-                                    canvas.save()
-                                    canvas.translate(stroke.minX, stroke.minY)
-                                    canvas.drawPicture(stroke.picture)
-                                    canvas.restore()
+
+                            selectedElements.forEach { element ->
+                                // Find the chunks this specific element overlaps
+                                val affectedKeys = getOverlappingChunkKeys(element.boundingBox, CHUNK_SIZE)
+
+                                // Fast append it to those chunks
+                                affectedKeys.forEach { key ->
+                                    val chunk = activeChunks.getOrPut(key) {
+                                        val parts = key.split(",")
+                                        CanvasChunk(parts[0].toInt(), parts[1].toInt(), CHUNK_SIZE)
+                                    }
+
+                                    chunk.canvas.save()
+                                    chunk.canvas.translate(-chunk.bounds.left, -chunk.bounds.top)
+
+                                    when (element) {
+                                        is PenStroke -> {
+                                            chunk.canvas.translate(element.minX, element.minY)
+                                            chunk.canvas.drawPicture(element.picture)
+                                        }
+                                        // is ImageElement -> ...
+                                    }
+                                    chunk.canvas.restore()
                                 }
-                                cacheVersion++
                             }
+                            cacheVersion++ // Trigger UI update
+
                             canvasElements = canvasElements + selectedElements
                             selectedElements = emptyList()
                         }
@@ -436,37 +475,45 @@ fun DrawingCanvas(
                                 }
                             }
                             else if (currentTool == ActiveTool.ERASESTROKE) {
-                                // Check with vectors if user is touching a stroke, if so, rebuild bitmap
+
                                 val eraserRadius = 50f
-                                //EXPERIMENT instead of rebuilding the cache (laggy) what if we draw over with white
-                                // this should lower lag when there are a lot of strokes in the bitmap because the bitmap will only be edited once the user picks up the pen
-                                // need new remember called erased strokes and then will draw those in white, keep bitmap as is until user picks up pen
 
-                                val newlyErased = canvasElements.filter { element ->
-                                    element !in erasedElements &&
-                                            element is PenStroke && // Make sure we are looking at ink
-                                            element.points.any { point ->
-                                                (point.offset - change.position).getDistance() < eraserRadius
-                                            }
+                                // Create the bounding box for the eraser touch
+                                val touchRect = Rect(
+                                    left = change.position.x - eraserRadius,
+                                    top = change.position.y - eraserRadius,
+                                    right = change.position.x + eraserRadius,
+                                    bottom = change.position.y + eraserRadius
+                                )
+
+                                // 1. Find the elements the user just touched
+                                val toErase = canvasElements.filter { element ->
+                                    // Fast bounding box check first
+                                    if (!element.boundingBox.overlaps(touchRect)) return@filter false
+
+                                    // check precisely if first is true
+                                    when (element) {
+                                        is PenStroke -> element.points.any {
+                                            (it.offset - change.position).getDistance() < eraserRadius
+                                        }
+                                        // dont erase other types
+                                    }
                                 }
 
-                                if (newlyErased.isNotEmpty()) {
-                                    erasedElements = erasedElements + newlyErased
+                                if (toErase.isNotEmpty()) {
+                                    // Remove them from the main list immediately
+                                    canvasElements = canvasElements.filterNot { it in toErase }
+
+                                    // Figure out which chunks need to be redrawn
+                                    val dirtyChunkKeys = mutableSetOf<String>()
+                                    toErase.forEach { erasedElement ->
+                                        dirtyChunkKeys.addAll(getOverlappingChunkKeys(erasedElement.boundingBox, CHUNK_SIZE))
+                                    }
+
+                                    // Trigger the targeted rebuild
+                                    rebuildTargetedChunks(canvasElements, dirtyChunkKeys.toList())
                                 }
 
-                                //BITMAP ERASE (SLOW)
-//                                val oldSize = canvasElements.size
-//                                canvasElements = canvasElements.filterNot { stroke -> //see if user is touching any strokes
-//                                    stroke.points.any { point ->
-//                                        (point.offset - change.position).getDistance() < eraserRadius
-//                                    }
-//                                }
-//                                // If we actually deleted something, rebuild the cache
-//                                if (canvasElements.size != oldSize) {
-//                                    rebuildCache(canvasElements)
-//
-//
-//                                }
                             } else if (currentTool == ActiveTool.LASSO) {
                                 if (isDraggingSelection) {
                                     // Calculate the distance moved since the last frame
@@ -492,50 +539,40 @@ fun DrawingCanvas(
                         }
                     } while (event.changes.any { it.pressed })
 
-                    // for eraser, check if there are erased strokes to do on penup
-                    if (currentTool == ActiveTool.ERASESTROKE && erasedElements.isNotEmpty()) {
-                        // Remove the erased elements from the main list
-                        canvasElements = canvasElements.filterNot { it in erasedElements }
-
-                        // Do the heavy cache rebuild once
-                        rebuildCache(canvasElements)
-
-                        // Clear the temp set
-                        erasedElements = emptySet()
-                    }
-
                     // FOR LASSO, CHECK IF THE USER CAPTURED ANYTHING
                     if (currentTool == ActiveTool.LASSO && lassoPath.isNotEmpty()) {
-                        // Separate the strokes based on the Ray-Casting algorithm
-                        val newlySelected = mutableListOf<PenStroke>()
-                        val unselected = mutableListOf<PenStroke>()
+                        val newlySelected = mutableListOf<CanvasElement>()
+                        val unselected = mutableListOf<CanvasElement>()
 
-                        for (stroke in canvasElements) {
-                            // If at least one point in the stroke is inside the lasso, select the whole stroke
-                            val isSelected = stroke.points.any { point ->
-                                isPointInPolygon(point.offset, lassoPath)
+                        for (element in canvasElements) {
+                            val isSelected = when (element) {
+                                is PenStroke -> element.points.any { isPointInPolygon(it.offset, lassoPath) }
+                                else -> false
                             }
 
                             if (isSelected) {
-                                newlySelected.add(stroke)
+                                newlySelected.add(element)
                             } else {
-                                unselected.add(stroke)
+                                unselected.add(element)
                             }
                         }
 
-                        // Update the state
                         selectedElements = selectedElements + newlySelected
                         canvasElements = unselected
 
-                        // If we successfully picked something up off the canvas, rebuild the cache without it
+                        // If we successfully picked something up, rebuild ONLY the chunks it came from
                         if (newlySelected.isNotEmpty()) {
-                            rebuildCache(canvasElements)
+                            val dirtyChunkKeys = mutableSetOf<String>()
+                            newlySelected.forEach { pickedUpElement ->
+                                dirtyChunkKeys.addAll(getOverlappingChunkKeys(pickedUpElement.boundingBox, CHUNK_SIZE))
+                            }
+
+                            rebuildTargetedChunks(canvasElements, dirtyChunkKeys.toList())
                         }
 
                         if (selectedElements.isEmpty()){
                             lassoPath = emptyList()
                         }
-                        //lassoPath = emptyList() // Clear the lasso line from the screen
                     }
 
                     // IF DRAW, ADD LAST STROKE TO COMPLETED
@@ -583,6 +620,7 @@ fun DrawingCanvas(
                         } else {
                             currentRawStroke
                         }
+                        // handle it depending on if its a dot or line
                         if (pointsToSave.size == 1) { //if it is just a single dot
                             val singlePoint = pointsToSave.first()
                             nativePaint.strokeWidth = (0.2f + (singlePoint.pressure * 0.8f)) * thickness
@@ -605,6 +643,7 @@ fun DrawingCanvas(
                         }
                         picture.endRecording()
 
+                        //create the data representation
                         val newStroke = PenStroke(
                             points = pointsToSave,
                             picture = picture,
@@ -612,14 +651,29 @@ fun DrawingCanvas(
                             color = pencolor,
                             minX = minX, minY = minY, maxX = maxX, maxY = maxY
                         )
-                        cacheCanvas?.let { canvas ->
-                            canvas.save()
-                            canvas.translate(newStroke.minX, newStroke.minY)
-                            canvas.drawPicture(newStroke.picture)
-                            canvas.restore()
-                            cacheVersion++
+                        //find the chunk keys that need to be updated
+                        val affectedKeys = getOverlappingChunkKeys(newStroke.boundingBox, CHUNK_SIZE)
+
+                        // fast append to those specific chunks
+                        affectedKeys.forEach { key ->
+                            val chunk = activeChunks.getOrPut(key) {
+                                val parts = key.split(",")
+                                CanvasChunk(parts[0].toInt(), parts[1].toInt(), CHUNK_SIZE)
+                            }
+
+                            chunk.canvas.save()
+                            // Shift the canvas backward so the chunk's top-left is 0,0 locally
+                            chunk.canvas.translate(-chunk.bounds.left, -chunk.bounds.top)
+
+                            // translate to the stroke's actual coordinates and draw it
+                            chunk.canvas.translate(newStroke.minX, newStroke.minY)
+                            chunk.canvas.drawPicture(newStroke.picture)
+
+                            chunk.canvas.restore()
                         }
 
+                        // 3. Update states
+                        cacheVersion++
                         canvasElements = canvasElements + newStroke
                         currentRawStroke = emptyList()
                     }
@@ -628,15 +682,15 @@ fun DrawingCanvas(
     ) {
         // Draw the strokes
         // efficient displaying with bitmap for completed strokes
-
-        cacheBitmap?.let { bmp ->
-            // We read cacheVersion so Compose knows to redraw when it changes
-            val trigger = cacheVersion
+        // bitmap chunked so for easier rerendering and expansion
+        val trigger = cacheVersion
+        activeChunks.values.forEach { chunk ->
             drawImage(
-                image = bmp,
-                topLeft = Offset.Zero
+                image = chunk.bitmap.asImageBitmap(),
+                topLeft = Offset(chunk.bounds.left, chunk.bounds.top)
             )
         }
+
         // less efficient drawing with points for current stroke
         if (currentRawStroke.isNotEmpty()) {
             val strokeToDraw = if (smoothCurrentStroke && arcSmoothing) {
@@ -647,40 +701,22 @@ fun DrawingCanvas(
             val currentStroke = PenStroke(points=strokeToDraw, thickness=thickness, color=pencolor, picture=Picture(), minX=0f, minY=0f, maxX=0f, maxY=0f) //create temp stroke with empty pic to pass to drawStroke
             drawStroke(currentStroke, thickness)
         }
-        //selected strokes use more optimized picture movement, but not as optimized as bitmap
+        //selected strokes use more optimized picture movement
         drawIntoCanvas { canvas ->
             selectedElements.forEach { stroke ->
                 canvas.save()
 
                 canvas.translate(stroke.minX, stroke.minY)
 
-                canvas.nativeCanvas.drawPicture(stroke.picture)
+                if (stroke is PenStroke){
+                    canvas.nativeCanvas.drawPicture(stroke.picture)
+                }
 
                 canvas.restore()
             }
         }
 
-        // in progress erasing: strokes already touched get rendered on top of in white until lift pen
 
-        // DRAW THE "WHITEOUT" OVER ERASED STROKES
-        if (erasedElements.isNotEmpty()) {
-            drawIntoCanvas { canvas ->
-                // Create a paint that forces all pixels to draw as background color
-                val whiteoutPaint = android.graphics.Paint().apply {
-                    colorFilter = android.graphics.PorterDuffColorFilter(
-                        android.graphics.Color.WHITE.toInt(), // will need to update if can change bg color
-                        android.graphics.PorterDuff.Mode.SRC_IN
-                    )
-                }
-
-                erasedElements.filterIsInstance<PenStroke>().forEach { stroke ->
-                    canvas.nativeCanvas.saveLayer(null, whiteoutPaint)
-                    canvas.nativeCanvas.translate(stroke.minX, stroke.minY)
-                    canvas.nativeCanvas.drawPicture(stroke.picture)
-                    canvas.nativeCanvas.restore()
-                }
-            }
-        }
 
         //draw the lasso path if it exists
         if (lassoPath.size > 1) {
