@@ -4,7 +4,9 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
 import android.graphics.Picture
+import androidx.compose.ui.graphics.toArgb
 import java.util.UUID
+import kotlinx.serialization.Serializable
 
 sealed interface CanvasElement {
     val id: String
@@ -55,5 +57,42 @@ data class PenStroke(
             // Notice we don't change the Picture. Your draw logic already handles
             // translating the canvas before drawing the picture, which is highly efficient!
         )
+    }
+}
+
+
+@Serializable
+data class SerializablePoint(
+    val x: Float,
+    val y: Float,
+    val pressure: Float
+)
+
+@Serializable
+data class SerializableElement(
+    val id: String,
+    val zIndex: Float,
+    val type: String, // "PEN", "IMAGE", etc.
+    // Stroke specific data
+    val points: List<SerializablePoint> = emptyList(),
+    val thickness: Float = 0f,
+    val colorArgb: Int = 0,
+    // Bounding box
+    val minX: Float, val maxX: Float, val minY: Float, val maxY: Float
+)
+
+fun CanvasElement.toSerializable(): SerializableElement {
+    return when (this) {
+        is PenStroke -> SerializableElement(
+            id = this.id,
+            zIndex = this.zIndex,
+            type = "PEN",
+            points = this.points.map { SerializablePoint(it.offset.x, it.offset.y, it.pressure) },
+            thickness = this.thickness,
+            colorArgb = this.color.toArgb(),
+            minX = this.minX, maxX = this.maxX, minY = this.minY, maxY = this.maxY
+        )
+        // is ImageElement -> ...
+        else -> throw IllegalArgumentException("Unknown element type")
     }
 }

@@ -1,4 +1,4 @@
-package com.nvemuri.parallelnotes.ui// Change this to match your package name!
+package com.nvemuri.parallelnotes.ui
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -42,6 +42,7 @@ import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.layout.ContentScale
+
 import com.nvemuri.parallelnotes.R
 import com.nvemuri.parallelnotes.data.entities.PenStroke
 import com.nvemuri.parallelnotes.data.entities.Point
@@ -51,6 +52,8 @@ import com.nvemuri.parallelnotes.utils.isPointInPolygon
 import com.nvemuri.parallelnotes.data.entities.CanvasElement
 import com.nvemuri.parallelnotes.utils.getOverlappingChunkKeys
 import com.nvemuri.parallelnotes.data.CanvasChunk
+import com.nvemuri.parallelnotes.utils.detectMultiFingerTap
+
 import android.graphics.Picture
 import android.graphics.Paint as NativePaint
 import android.graphics.Canvas as NativeCanvas
@@ -60,23 +63,39 @@ import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.foundation.gestures.detectTransformGestures
+import com.nvemuri.parallelnotes.data.AppDatabase
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        // setContent is the entry point, similar to rendering a root component in React
+
+        // 1. Initialize the database
+        val database = AppDatabase.getDatabase(applicationContext)
+        val noteDao = database.noteDao()
+
+// THE FIX: Pass the applicationContext into the factory!
+        val viewModelFactory = NoteViewModelFactory(applicationContext, noteDao)
+
         setContent {
-            PenNoteApp()
+            // Grab the ViewModel
+            val viewModel: NoteViewModel = androidx.lifecycle.viewmodel.compose.viewModel(
+                factory = viewModelFactory
+            )
+
+            // Pass it to your app
+            PenNoteApp(viewModel)
         }
     }
 }
 
 
 @Composable
-fun NoteTakingScreen(onNavigateHome: () -> Unit){
+fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     var currentTool by remember { mutableStateOf(ActiveTool.DRAW)}
 
     //pen settings
@@ -87,11 +106,13 @@ fun NoteTakingScreen(onNavigateHome: () -> Unit){
     var isColorSelectorOpen by remember { mutableStateOf(false)}
     var arcSmoothingEnabled by remember { mutableStateOf(true) }
     var removeJitterAmount by remember { mutableFloatStateOf(15f) }
-    var smoothCurrentStroke by remember { mutableStateOf(false) }
-
+    var smoothCurrentStroke by remember { mutableStateOf(true) }
+    //name states
+    val noteTitle by viewModel.currentNoteTitle.collectAsState()
+    var showRenameDialog by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize()){
-        DrawingCanvas(currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke, removeJitterAmount)
+        DrawingCanvas(currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke, removeJitterAmount, viewModel)
 
 
         Surface(
@@ -234,6 +255,29 @@ fun NoteTakingScreen(onNavigateHome: () -> Unit){
                 }
             )
         }
+        Surface(
+            modifier = Modifier
+                .align(Alignment.TopCenter)
+                .padding(16.dp)
+                .clickable { showRenameDialog = true }, // Opens the dialog!
+            shape = RoundedCornerShape(50), // Makes it a pill shape
+            color = Color.White,
+            shadowElevation = 8.dp,
+            border = BorderStroke(2.dp, Color.Black)
+        ) {
+            Text(
+                text = noteTitle,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 12.dp)
+            )
+        }
+        if (showRenameDialog) {
+            RenameNoteDialog(
+                currentTitle = noteTitle,
+                onDismiss = { showRenameDialog = false },
+                onConfirm = { newTitle -> viewModel.updateTitle(newTitle) }
+            )
+        }
     }
 }
 
@@ -259,8 +303,10 @@ fun DrawingCanvas(
     pencolor: Color,
     arcSmoothing: Boolean,
     smoothCurrentStroke: Boolean,
-    removeJitterAmount: Float
+    removeJitterAmount: Float,
+    viewModel: NoteViewModel
 ) {
+    val loadedElements by viewModel.currentElements.collectAsState()
     //Drawing States (Vector)
     var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) } //change this to emptyList CanvasElement later
     var currentRawStroke by remember { mutableStateOf(emptyList<Point>())}
@@ -280,6 +326,21 @@ fun DrawingCanvas(
     var activeChunks by remember { mutableStateOf(mutableMapOf<String, CanvasChunk>()) }
     val CHUNK_SIZE = 512
 
+    //Viewport states
+    var viewportPan by remember { mutableStateOf(Offset.Zero) }
+    var viewportScale by remember { mutableFloatStateOf(1f) }
+
+
+
+    // screen coord to actual canvas coord
+    val screenToWorld: (Offset) -> Offset = { screenPos ->
+        (screenPos - viewportPan) / viewportScale
+    }
+    LaunchedEffect(loadedElements) {
+        if (loadedElements.isNotEmpty() && canvasElements.isEmpty()) {
+            canvasElements = loadedElements
+        }
+    }
 
     // Helper function for rebuilding chunks
     val rebuildTargetedChunks: (List<CanvasElement>, List<String>) -> Unit = { allElements, dirtyChunkKeys ->
@@ -314,7 +375,18 @@ fun DrawingCanvas(
         }
         cacheVersion++ // Trigger Compose to re-render the chunks
     }
+    LaunchedEffect(canvasElements) {
+        viewModel.updateCurrentElements(canvasElements)
 
+        // If we just loaded an existing note (elements exist but chunks don't yet), build the chunks!
+        if (canvasElements.isNotEmpty() && activeChunks.isEmpty()) {
+            val allKeys = mutableSetOf<String>()
+            canvasElements.forEach { element ->
+                allKeys.addAll(getOverlappingChunkKeys(element.boundingBox, CHUNK_SIZE))
+            }
+            rebuildTargetedChunks(canvasElements, allKeys.toList())
+        }
+    }
     LaunchedEffect(Unit) {
         if (canvasElements.isNotEmpty() && activeChunks.isEmpty()) {
             // Find every chunk that needs to exist
@@ -330,6 +402,28 @@ fun DrawingCanvas(
     Canvas(
         modifier = Modifier
             .fillMaxSize()
+            .pointerInput(Unit) {
+                detectTransformGestures { centroid, pan, zoom, rotation ->
+                    // save the old scale before mutating it
+                    val oldScale = viewportScale
+                    // apply the new zoom
+                    viewportScale = (viewportScale * zoom).coerceIn(0.1f, 5.0f)
+                    // calculate the scale ratio
+                    val scaleRatio = viewportScale / oldScale
+                    // apply the true focal point math
+                    viewportPan = (viewportPan - centroid) * scaleRatio + centroid + pan
+                }
+            }
+            .pointerInput(Unit){
+                detectMultiFingerTap(
+                    onTwoFingerTap = {
+
+                    },
+                    onThreeFingerTap = {
+
+                    }
+                )
+            }
             .pointerInput(Unit){
                 awaitPointerEventScope {
                     while(true){
@@ -362,18 +456,18 @@ fun DrawingCanvas(
                     val startPressure = down.pressure
 
                     // Streamline stuff (position)
-                    var virtualBrush = down.position
+                    var virtualBrush = screenToWorld(down.position)
                     val stringLength = removeJitterAmount
 
                     //streamline stuff (velocity)
                     var lastTime = down.uptimeMillis
-                    var lastHardwarePos = down.position
+                    var lastHardwarePos = screenToWorld(down.position)
 
                     val maxVelo = 5.0f // may need to be tweaked
 
                     //make a single dot if just tapped
                     if (currentTool == ActiveTool.DRAW) {
-                        currentRawStroke = listOf(Point(down.position, startPressure))
+                        currentRawStroke = listOf(Point(screenToWorld(down.position), startPressure))
 
                     }
 
@@ -440,10 +534,10 @@ fun DrawingCanvas(
 
                         if (change.pressed) {
                             change.consume()
-
+                            val stylusPos = screenToWorld(change.position) //position of actual pointer
                             if (currentTool == ActiveTool.DRAW) {
                                 val movePressure = if (change.type == PointerType.Stylus) change.pressure else 1.0f
-                                val stylusPos = change.position //position of actual pointer
+
                                 val currentTime = change.uptimeMillis
 
                                 //streamline logic, velocity
@@ -477,13 +571,12 @@ fun DrawingCanvas(
                             else if (currentTool == ActiveTool.ERASESTROKE) {
 
                                 val eraserRadius = 50f
-
                                 // Create the bounding box for the eraser touch
                                 val touchRect = Rect(
-                                    left = change.position.x - eraserRadius,
-                                    top = change.position.y - eraserRadius,
-                                    right = change.position.x + eraserRadius,
-                                    bottom = change.position.y + eraserRadius
+                                    left = stylusPos.x - eraserRadius,
+                                    top = stylusPos.y - eraserRadius,
+                                    right = stylusPos.x + eraserRadius,
+                                    bottom = stylusPos.y + eraserRadius
                                 )
 
                                 // 1. Find the elements the user just touched
@@ -494,7 +587,7 @@ fun DrawingCanvas(
                                     // check precisely if first is true
                                     when (element) {
                                         is PenStroke -> element.points.any {
-                                            (it.offset - change.position).getDistance() < eraserRadius
+                                            (it.offset - stylusPos).getDistance() < eraserRadius
                                         }
                                         // dont erase other types
                                     }
@@ -517,8 +610,8 @@ fun DrawingCanvas(
                             } else if (currentTool == ActiveTool.LASSO) {
                                 if (isDraggingSelection) {
                                     // Calculate the distance moved since the last frame
-                                    val dx = change.position.x - dragLastPosition.x
-                                    val dy = change.position.y - dragLastPosition.y
+                                    val dx = stylusPos.x - dragLastPosition.x
+                                    val dy = stylusPos.y - dragLastPosition.y
 
                                     // Translate all selected strokes to new location
                                     selectedElements = selectedElements.map { element ->
@@ -530,10 +623,10 @@ fun DrawingCanvas(
                                         Offset(offset.x + dx, offset.y + dy)
                                     }
 
-                                    dragLastPosition = change.position
+                                    dragLastPosition = stylusPos
                                 } else {
                                     // Just drawing the lasso loop
-                                    lassoPath = lassoPath + change.position
+                                    lassoPath = lassoPath + stylusPos
                                 }
                             }
                         }
@@ -680,63 +773,76 @@ fun DrawingCanvas(
                 }
             }
     ) {
-        // Draw the strokes
-        // efficient displaying with bitmap for completed strokes
-        // bitmap chunked so for easier rerendering and expansion
-        val trigger = cacheVersion
-        activeChunks.values.forEach { chunk ->
-            drawImage(
-                image = chunk.bitmap.asImageBitmap(),
-                topLeft = Offset(chunk.bounds.left, chunk.bounds.top)
-            )
-        }
-
-        // less efficient drawing with points for current stroke
-        if (currentRawStroke.isNotEmpty()) {
-            val strokeToDraw = if (smoothCurrentStroke && arcSmoothing) {
-                bezierSmoothStroke(currentRawStroke)
-            } else {
-                currentRawStroke
+        //draw the strokes and canvas elements with transform
+        withTransform({
+            translate(viewportPan.x, viewportPan.y)
+            scale(viewportScale, viewportScale, Offset.Zero)
+        }) {
+            // Draw the strokes
+            // efficient displaying with bitmap for completed strokes
+            // bitmap chunked so for easier rerendering and expansion
+            val trigger = cacheVersion
+            activeChunks.values.forEach { chunk ->
+                drawImage(
+                    image = chunk.bitmap.asImageBitmap(),
+                    topLeft = Offset(chunk.bounds.left, chunk.bounds.top)
+                )
             }
-            val currentStroke = PenStroke(points=strokeToDraw, thickness=thickness, color=pencolor, picture=Picture(), minX=0f, minY=0f, maxX=0f, maxY=0f) //create temp stroke with empty pic to pass to drawStroke
-            drawStroke(currentStroke, thickness)
-        }
-        //selected strokes use more optimized picture movement
-        drawIntoCanvas { canvas ->
-            selectedElements.forEach { stroke ->
-                canvas.save()
 
-                canvas.translate(stroke.minX, stroke.minY)
+            // less efficient drawing with points for current stroke
+            if (currentRawStroke.isNotEmpty()) {
+                val strokeToDraw = if (smoothCurrentStroke && arcSmoothing) {
+                    bezierSmoothStroke(currentRawStroke)
+                } else {
+                    currentRawStroke
+                }
+                val currentStroke = PenStroke(
+                    points = strokeToDraw,
+                    thickness = thickness,
+                    color = pencolor,
+                    picture = Picture(),
+                    minX = 0f,
+                    minY = 0f,
+                    maxX = 0f,
+                    maxY = 0f
+                ) //create temp stroke with empty pic to pass to drawStroke
+                drawStroke(currentStroke, thickness)
+            }
+            //selected strokes use more optimized picture movement
+            drawIntoCanvas { canvas ->
+                selectedElements.forEach { stroke ->
+                    canvas.save()
 
-                if (stroke is PenStroke){
-                    canvas.nativeCanvas.drawPicture(stroke.picture)
+                    canvas.translate(stroke.minX, stroke.minY)
+
+                    if (stroke is PenStroke) {
+                        canvas.nativeCanvas.drawPicture(stroke.picture)
+                    }
+
+                    canvas.restore()
+                }
+            }
+
+            //draw the lasso path if it exists
+            if (lassoPath.size > 1) {
+                val path = Path().apply {
+                    moveTo(lassoPath.first().x, lassoPath.first().y)
+                    lassoPath.drop(1).forEach { lineTo(it.x, it.y) }
+                    close() // Connect the end back to the start
                 }
 
-                canvas.restore()
-            }
-        }
-
-
-
-        //draw the lasso path if it exists
-        if (lassoPath.size > 1) {
-            val path = Path().apply {
-                moveTo(lassoPath.first().x, lassoPath.first().y)
-                lassoPath.drop(1).forEach { lineTo(it.x, it.y) }
-                close() // Connect the end back to the start
-            }
-
-            // Draw a dashed line
-            drawPath(
-                path = path,
-                color = Color.Gray,
-                style = Stroke(
-                    width = 3f,
-                    pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f)
+                // Draw a dashed line
+                drawPath(
+                    path = path,
+                    color = Color.Gray,
+                    style = Stroke(
+                        width = 3f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f)
+                    )
                 )
-            )
+            }
         }
-
+        // non transformed things
         // move the cursor
         cursorPosition?.let { pos ->
             if (currentTool == ActiveTool.DRAW) {
@@ -920,6 +1026,39 @@ fun PresetColorPickerDialog(
             TextButton(onClick = onDismiss) {
                 Text("Cancel")
             }
+        }
+    )
+}
+
+@Composable
+fun RenameNoteDialog(
+    currentTitle: String,
+    onDismiss: () -> Unit,
+    onConfirm: (String) -> Unit
+) {
+    var text by remember { mutableStateOf(currentTitle) }
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Rename Note") },
+        text = {
+            OutlinedTextField(
+                value = text,
+                onValueChange = { text = it },
+                singleLine = true,
+                label = { Text("Note Title") }
+            )
+        },
+        confirmButton = {
+            TextButton(
+                onClick = {
+                    onConfirm(text)
+                    onDismiss()
+                }
+            ) { Text("Save") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
         }
     )
 }

@@ -11,6 +11,7 @@ import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.data.entities.PenStroke
+import kotlin.math.floor
 
 // Drawing Functions
 fun DrawScope.drawStroke( //should ideally replace this entirely with drawpath eventually
@@ -171,11 +172,11 @@ fun generatePathFromPoints(points: List<Point>): Path {
 fun getOverlappingChunkKeys(bounds: Rect, CHUNK_SIZE: Int): List<String> {
     val keys = mutableListOf<String>()
 
-    // Find the min and max chunk coordinates
-    val minGridX = (bounds.left / CHUNK_SIZE).toInt()
-    val minGridY = (bounds.top / CHUNK_SIZE).toInt()
-    val maxGridX = (bounds.right / CHUNK_SIZE).toInt()
-    val maxGridY = (bounds.bottom / CHUNK_SIZE).toInt()
+    // must use floor(), otherwise -0.5 truncates to 0, breaking negative chunks
+    val minGridX = floor(bounds.left / CHUNK_SIZE).toInt()
+    val minGridY = floor(bounds.top / CHUNK_SIZE).toInt()
+    val maxGridX = floor(bounds.right / CHUNK_SIZE).toInt()
+    val maxGridY = floor(bounds.bottom / CHUNK_SIZE).toInt()
 
     for (x in minGridX..maxGridX) {
         for (y in minGridY..maxGridY) {
