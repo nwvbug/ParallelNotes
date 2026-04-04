@@ -21,39 +21,43 @@ import com.nvemuri.parallelnotes.data.entities.CanvasElement
 import com.nvemuri.parallelnotes.data.entities.PenStroke
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
+import com.nvemuri.parallelnotes.utils.bezierSmoothStroke
 import kotlinx.serialization.json.Json
 import android.content.Context
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
-@Database(entities = [NoteEntity::class], version = 1, exportSchema = false)
-@TypeConverters(CanvasDataConverter::class) // Attach the JSON converter!
+
+@Database(entities = [NoteEntity::class], version = 2, exportSchema = false)
+@TypeConverters(CanvasDataConverter::class) 
 abstract class AppDatabase : RoomDatabase() {
-
     abstract fun noteDao(): NoteDao
-
     companion object {
-        @Volatile // Ensures changes to INSTANCE are immediately visible to all threads
+        @Volatile
         private var INSTANCE: AppDatabase? = null
-
         fun getDatabase(context: Context): AppDatabase {
-            // If INSTANCE is not null, return it. Otherwise, create the database.
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
                     context.applicationContext,
                     AppDatabase::class.java,
                     "parallel_notes_database"
-                ).fallbackToDestructiveMigration().build()
+                )
+                    .fallbackToDestructiveMigration() // Note: This will wipe data on schema change
+                    .build()
                 INSTANCE = instance
                 instance
             }
         }
     }
 }
+
 @Dao
 interface NoteDao {
     @Query("SELECT * FROM notes ORDER BY lastModified DESC")
-    fun getAllNotes(): Flow<List<NoteEntity>> // Back to returning the standard Entity!
+    fun getAllNotes(): Flow<List<NoteEntity>>
+
+    @Query("SELECT DISTINCT folder FROM notes")
+    fun getAllFolders(): Flow<List<String>>
 
     @Query("SELECT * FROM notes WHERE noteId = :id")
     suspend fun getNoteById(id: String): NoteEntity?
@@ -64,26 +68,20 @@ interface NoteDao {
     @Delete
     suspend fun deleteNote(note: NoteEntity)
 }
+
 @Entity(tableName = "notes")
 data class NoteEntity(
     @PrimaryKey val noteId: String,
     val title: String,
-    val lastModified: Long = System.currentTimeMillis()
-    // ❌ We completely removed the canvasData list and Converter!
+    val lastModified: Long = System.currentTimeMillis(),
+    val folder: String = "MyFolder" // Default folder for new/existing notes
 )
 
 class CanvasDataConverter {
-
     @TypeConverter
-    fun fromCanvasData(data: List<SerializableElement>): String {
-        // Converts the List into a JSON String
-        return Json.encodeToString(data)
-    }
-
+    fun fromCanvasData(data: List<SerializableElement>): String = Json.encodeToString(data)
     @TypeConverter
     fun toCanvasData(jsonString: String): List<SerializableElement> {
-        // Converts the JSON String back into a List
-        // If the string is empty, return an empty list to prevent crashes
         if (jsonString.isBlank()) return emptyList()
         return Json.decodeFromString(jsonString)
     }
@@ -93,8 +91,14 @@ fun SerializableElement.toCanvasElement(): CanvasElement {
     return when (type) {
         "PEN" -> {
             val composeColor = Color(colorArgb)
+            val savedPoints = points.map { Point(Offset(it.x, it.y), it.pressure) }
+            
+            val smoothedPoints = if (version >= 1 && arcSmoothing) {
+                bezierSmoothStroke(savedPoints)
+            } else {
+                savedPoints
+            }
 
-            // 1. Recreate the Picture
             val picture = Picture()
             val width = (maxX - minX).toInt() + 1
             val height = (maxY - minY).toInt() + 1
@@ -107,30 +111,30 @@ fun SerializableElement.toCanvasElement(): CanvasElement {
                 strokeJoin = NativePaint.Join.ROUND
             }
 
-            // 2. Redraw the math into the new Picture
-            if (points.size == 1) {
-                val p = points.first()
+            if (smoothedPoints.size == 1) {
+                val p = smoothedPoints.first()
                 nativePaint.strokeWidth = (0.2f + (p.pressure * 0.8f)) * thickness
-                nativeCanvas.drawPoint(p.x - minX, p.y - minY, nativePaint)
+                nativeCanvas.drawPoint(p.offset.x - minX, p.offset.y - minY, nativePaint)
             } else {
-                for (i in 0 until points.size - 1) {
-                    val start = points[i]
-                    val end = points[i + 1]
+                for (i in 0 until smoothedPoints.size - 1) {
+                    val start = smoothedPoints[i]
+                    val end = smoothedPoints[i + 1]
                     nativePaint.strokeWidth = (0.2f + (end.pressure * 0.8f)) * thickness
                     nativeCanvas.drawLine(
-                        start.x - minX, start.y - minY,
-                        end.x - minX, end.y - minY,
+                        start.offset.x - minX, start.offset.y - minY,
+                        end.offset.x - minX, end.offset.y - minY,
                         nativePaint
                     )
                 }
             }
             picture.endRecording()
 
-            // 3. Return the fully reconstructed Runtime object
             PenStroke(
                 id = id,
                 zIndex = zIndex,
-                points = points.map { Point(Offset(it.x, it.y), it.pressure) },
+                rawPoints = savedPoints,
+                points = smoothedPoints,
+                arcSmoothing = arcSmoothing,
                 thickness = thickness,
                 color = composeColor,
                 picture = picture,
@@ -141,7 +145,6 @@ fun SerializableElement.toCanvasElement(): CanvasElement {
     }
 }
 
-// Put this near NoteEntity
 data class NoteSummary(
     val noteId: String,
     val title: String,

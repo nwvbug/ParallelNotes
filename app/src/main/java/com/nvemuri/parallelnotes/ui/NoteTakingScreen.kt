@@ -69,6 +69,11 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.gestures.detectTransformGestures
 import com.nvemuri.parallelnotes.data.AppDatabase
+import java.util.UUID
+
+import android.content.Intent
+import androidx.core.content.FileProvider
+import androidx.compose.ui.platform.LocalContext
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -101,15 +106,20 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     //pen settings
     var isPenMenuOpen by remember { mutableStateOf(false)}
     var currentPenStyle by remember { mutableStateOf(PenStyle.SOLID) }
-    var penThickness by remember { mutableFloatStateOf(15f) }
+    // Increased default thickness since we're starting zoomed out
+    var penThickness by remember { mutableFloatStateOf(35f) }
     var penColor by remember { mutableStateOf(Color.Black) }
     var isColorSelectorOpen by remember { mutableStateOf(false)}
     var arcSmoothingEnabled by remember { mutableStateOf(true) }
-    var removeJitterAmount by remember { mutableFloatStateOf(15f) }
+    var removeJitterAmount by remember { mutableFloatStateOf(25f) }
     var smoothCurrentStroke by remember { mutableStateOf(true) }
     //name states
     val noteTitle by viewModel.currentNoteTitle.collectAsState()
     var showRenameDialog by remember { mutableStateOf(false) }
+
+    // More Options Menu
+    var isMoreMenuOpen by remember { mutableStateOf(false) }
+    val context = LocalContext.current
 
     Box(modifier = Modifier.fillMaxSize()){
         DrawingCanvas(currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke, removeJitterAmount, viewModel)
@@ -188,6 +198,22 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
                     )
                 }
 
+                // NEW: More Options Button
+                IconButton(
+                    onClick = { isMoreMenuOpen = !isMoreMenuOpen },
+                    modifier = Modifier.border(
+                        width = if (isMoreMenuOpen) 3.dp else 0.dp,
+                        color = if (isMoreMenuOpen) Color.Black else Color.Transparent,
+                        shape = CircleShape
+                    )
+                ) {
+                    Icon(
+                        painter = painterResource(id = R.drawable.more), // Temp icon
+                        contentDescription = "More Options",
+                        modifier = Modifier.padding(6.dp)
+                    )
+                }
+
             }
         }
         Surface(
@@ -244,6 +270,53 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
                     onJitterChange = { removeJitterAmount = it },
                     onColorPickerClick = { isColorSelectorOpen = true }
                 )
+            }
+        }
+
+        if (isMoreMenuOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            down.consume()
+                            isMoreMenuOpen = false
+                        }
+                    }
+            )
+
+            Surface(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 105.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = Color.White,
+                shadowElevation = 8.dp,
+                border = BorderStroke(3.dp, Color.Black)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    TextButton(onClick = {
+                        isMoreMenuOpen = false
+                        viewModel.exportToPdf { file ->
+                            if (file != null) {
+                                val uri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.provider",
+                                    file
+                                )
+                                val intent = Intent(Intent.ACTION_SEND).apply {
+                                    type = "application/pdf"
+                                    putExtra(Intent.EXTRA_STREAM, uri)
+                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                }
+                                context.startActivity(Intent.createChooser(intent, "Share Note PDF"))
+                            }
+                        }
+                    }) {
+                        Text("Export to PDF", color = Color.Black, fontWeight = FontWeight.Bold)
+                    }
+                }
             }
         }
 
@@ -328,7 +401,8 @@ fun DrawingCanvas(
 
     //Viewport states
     var viewportPan by remember { mutableStateOf(Offset.Zero) }
-    var viewportScale by remember { mutableFloatStateOf(1f) }
+    // Start zoomed out (0.5x) to give a larger overview by default
+    var viewportScale by remember { mutableFloatStateOf(0.5f) }
 
 
 
@@ -738,7 +812,11 @@ fun DrawingCanvas(
 
                         //create the data representation
                         val newStroke = PenStroke(
+                            id = UUID.randomUUID().toString(),
+                            zIndex = 0f,
+                            rawPoints = currentRawStroke,
                             points = pointsToSave,
+                            arcSmoothing = arcSmoothing,
                             picture = picture,
                             thickness = thickness,
                             color = pencolor,
@@ -797,7 +875,11 @@ fun DrawingCanvas(
                     currentRawStroke
                 }
                 val currentStroke = PenStroke(
+                    id = "temp",
+                    zIndex = 0f,
+                    rawPoints = currentRawStroke,
                     points = strokeToDraw,
+                    arcSmoothing = arcSmoothing,
                     thickness = thickness,
                     color = pencolor,
                     picture = Picture(),
@@ -854,12 +936,12 @@ fun DrawingCanvas(
                     style = Stroke(width = 2f)
                 )
             } else if (currentTool == ActiveTool.ERASESTROKE) {
-                // A large, semi-transparent circle matching your eraser radius
+                // A large, semi-transparent circle matching your eraser radius in world units
                 drawCircle(
                     color = Color.Gray,
-                    radius = 50f, // This matches the 50f radius in your eraser logic
+                    radius = 50f * viewportScale, // Correctly scaled with viewport
                     center = pos,
-                    alpha = 0.5f  // Equivalent to setting opacity in CSS
+                    alpha = 0.5f
                 )
             }
         }
@@ -925,7 +1007,7 @@ fun PenCustomizationPanel(
                     Slider(
                         value = thickness,
                         onValueChange = onThicknessChange,
-                        valueRange = 1f..50f,
+                        valueRange = 10f..80f, // Expanded range for zoomed out view
                         modifier = Modifier.width(120.dp)
                     )
                 }
