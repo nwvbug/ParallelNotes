@@ -43,6 +43,7 @@ fun PenNoteApp(viewModel: NoteViewModel) {
                         onNavigateHome = {
                             val actualTitle = viewModel.currentNoteTitle.value
                             viewModel.saveNote(actualTitle, viewModel.currentElements.value)
+                            viewModel.resetCurrentNote()
                             currentScreen = AppScreen.HOME
                         }
                     )

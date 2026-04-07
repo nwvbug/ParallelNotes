@@ -17,10 +17,14 @@ import androidx.room.Room
 import androidx.room.RoomDatabase
 import androidx.room.TypeConverter
 import androidx.room.TypeConverters
+import androidx.room.migration.Migration
+import androidx.sqlite.db.SupportSQLiteDatabase
 import com.nvemuri.parallelnotes.data.entities.CanvasElement
 import com.nvemuri.parallelnotes.data.entities.PenStroke
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
+import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
+import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
 import com.nvemuri.parallelnotes.utils.bezierSmoothStroke
 import kotlinx.serialization.json.Json
 import android.content.Context
@@ -28,13 +32,49 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 
-@Database(entities = [NoteEntity::class], version = 2, exportSchema = false)
+@Database(entities = [NoteEntity::class, ImportantStrokeEntity::class, ImportantCategoryEntity::class], version = 4, exportSchema = false)
 @TypeConverters(CanvasDataConverter::class) 
 abstract class AppDatabase : RoomDatabase() {
     abstract fun noteDao(): NoteDao
+    abstract fun importantStrokeDao(): ImportantStrokeDao
+    abstract fun importantCategoryDao(): ImportantCategoryDao
+    
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        private val MIGRATION_3_4 = object : Migration(3, 4) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                // Drop and recreate important_strokes with new schema
+                db.execSQL("DROP TABLE IF EXISTS `important_strokes` ")
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `important_strokes` (
+                        `id` TEXT NOT NULL, 
+                        `folderName` TEXT NOT NULL, 
+                        `noteId` TEXT NOT NULL, 
+                        `noteTitle` TEXT NOT NULL, 
+                        `serializedElements` TEXT NOT NULL, 
+                        `minX` REAL NOT NULL, 
+                        `maxX` REAL NOT NULL, 
+                        `minY` REAL NOT NULL, 
+                        `maxY` REAL NOT NULL, 
+                        `colorArgb` INTEGER NOT NULL,
+                        `categoryName` TEXT NOT NULL,
+                        `timestamp` INTEGER NOT NULL, 
+                        PRIMARY KEY(`id`)
+                    )
+                """.trimIndent())
+                
+                db.execSQL("""
+                    CREATE TABLE IF NOT EXISTS `important_categories` (
+                        `name` TEXT NOT NULL, 
+                        `colorArgb` INTEGER NOT NULL, 
+                        PRIMARY KEY(`name`)
+                    )
+                """.trimIndent())
+            }
+        }
+
         fun getDatabase(context: Context): AppDatabase {
             return INSTANCE ?: synchronized(this) {
                 val instance = Room.databaseBuilder(
@@ -42,7 +82,7 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "parallel_notes_database"
                 )
-                    .fallbackToDestructiveMigration() // Note: This will wipe data on schema change
+                    .addMigrations(MIGRATION_3_4)
                     .build()
                 INSTANCE = instance
                 instance

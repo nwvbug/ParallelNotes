@@ -11,6 +11,8 @@ import com.nvemuri.parallelnotes.data.entities.PenStroke
 import com.nvemuri.parallelnotes.data.entities.toSerializable
 import com.nvemuri.parallelnotes.data.toCanvasElement
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -23,14 +25,28 @@ import java.util.UUID
 import android.content.Context
 import android.graphics.pdf.PdfDocument
 import androidx.compose.ui.graphics.toArgb
+import com.nvemuri.parallelnotes.data.ImportantStrokeDao
+import com.nvemuri.parallelnotes.data.ImportantCategoryDao
+import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
+import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.io.File
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
+import kotlin.math.sqrt
 
-class NoteViewModel(private val context: Context, private val noteDao: NoteDao) : ViewModel() {
+class NoteViewModel(
+    private val context: Context,
+    private val noteDao: NoteDao,
+    private val importantStrokeDao: ImportantStrokeDao,
+    private val importantCategoryDao: ImportantCategoryDao
+) : ViewModel() {
     private val _currentNoteTitle = MutableStateFlow("Untitled Note")
     val currentNoteTitle: StateFlow<String> = _currentNoteTitle.asStateFlow()
 
@@ -39,6 +55,11 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading.asStateFlow()
+
+    private val _selectedImportantCategory = MutableStateFlow<ImportantCategoryEntity?>(null)
+    val selectedImportantCategory: StateFlow<ImportantCategoryEntity?> = _selectedImportantCategory.asStateFlow()
+
+    private var autosaveJob: Job? = null
 
     init {
         syncDatabaseWithFiles()
@@ -65,12 +86,33 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
         }
     }
 
+    fun resetCurrentNote() {
+        autosaveJob?.cancel()
+        currentNoteId = ""
+        _currentElements.value = emptyList()
+        _currentNoteTitle.value = "Untitled Note"
+        // Do NOT reset _currentFolder here if want the home screen
+        // to stay on the folder you were just viewing.
+    }
+
+    private fun scheduleAutosave() {
+        if (currentNoteId.isEmpty()) return // Don't autosave if no note is active
+
+        autosaveJob?.cancel()
+        autosaveJob = viewModelScope.launch {
+            delay(3000) // Wait for 3 seconds of inactivity before autosaving
+            saveNote(_currentNoteTitle.value, _currentElements.value, isAutoSave = true)
+        }
+    }
+
     fun updateTitle(newTitle: String) {
         _currentNoteTitle.value = newTitle
+        scheduleAutosave()
     }
 
     fun updateFolder(folderName: String) {
         _currentFolder.value = folderName
+        scheduleAutosave()
     }
 
     val allNotes: StateFlow<List<NoteEntity>> = noteDao.getAllNotes()
@@ -84,19 +126,45 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
         }
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), listOf("MyFolder"))
 
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val importantStrokes: StateFlow<List<ImportantStrokeEntity>> = _currentFolder
+        .flatMapLatest { folder -> importantStrokeDao.getImportantStrokesForFolder(folder) }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
+    val importantCategories: StateFlow<List<ImportantCategoryEntity>> = importantCategoryDao.getAllCategories()
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5000), emptyList())
+
     private val _currentElements = MutableStateFlow<List<CanvasElement>>(emptyList())
     fun updateCurrentElements(elements: List<CanvasElement>) {
         _currentElements.value = elements
+        scheduleAutosave()
     }
     val currentElements: StateFlow<List<CanvasElement>> = _currentElements.asStateFlow()
 
     var currentNoteId: String = ""
         private set
 
+    fun selectImportantCategory(category: ImportantCategoryEntity?) {
+        _selectedImportantCategory.value = category
+    }
+
+    fun createImportantCategory(name: String, color: Int) {
+        viewModelScope.launch(Dispatchers.IO) {
+            importantCategoryDao.insertOrUpdate(ImportantCategoryEntity(name, color))
+        }
+    }
+
+    fun deleteImportantCategory(category: ImportantCategoryEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            importantCategoryDao.delete(category)
+        }
+    }
+
     fun loadNote(noteId: String) {
         currentNoteId = noteId
         _currentElements.value = emptyList()
         _isLoading.value = true
+        autosaveJob?.cancel()
 
         viewModelScope.launch {
             try {
@@ -124,14 +192,24 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
         }
     }
 
-    fun saveNote(title: String, elements: List<CanvasElement>) {
+    fun saveNote(title: String, elements: List<CanvasElement>, isAutoSave: Boolean = false) {
+        if (isAutoSave && currentNoteId.isEmpty()) {
+            if (elements.isEmpty() && (title == "Untitled Note" || title.isBlank())) {
+                return
+            }
+        }
+        if (!isAutoSave) {
+            autosaveJob?.cancel()
+        }
+
         if (currentNoteId.isEmpty()) {
+            if (isAutoSave && elements.isEmpty() && title == "Untitled Note") return
             currentNoteId = UUID.randomUUID().toString()
         }
         val idToSave = currentNoteId
         val folderToSave = _currentFolder.value
 
-        _isLoading.value = true
+        if (!isAutoSave) _isLoading.value = true
         viewModelScope.launch {
             try {
                 withContext(Dispatchers.Default) {
@@ -151,7 +229,7 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
                     noteDao.insertOrUpdateNote(newNote)
                 }
             } finally {
-                _isLoading.value = false
+                if (!isAutoSave) _isLoading.value = false
             }
         }
     }
@@ -161,6 +239,115 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
         _currentElements.value = emptyList()
         _currentNoteTitle.value = "Untitled Note"
         _currentFolder.value = folder
+        autosaveJob?.cancel()
+    }
+
+    fun processImportantStroke(newStroke: PenStroke) {
+        viewModelScope.launch(Dispatchers.IO) {
+            val folder = _currentFolder.value
+            val category = _selectedImportantCategory.value
+            val categoryName = category?.name ?: "Important"
+            val categoryColor = category?.colorArgb ?: 0xFFFFD700.toInt()
+            
+            val existingStrokes = importantStrokeDao.getImportantStrokesForFolderSync(folder)
+            
+            // Proximity threshold (e.g., 100 pixels)
+            val threshold = 300f
+            
+            val nearbyStroke = existingStrokes.find { existing ->
+                // Check if bounding boxes are close AND same category
+                val dist = distanceBetweenRects(
+                    existing.minX, existing.minY, existing.maxX, existing.maxY,
+                    newStroke.minX, newStroke.minY, newStroke.maxX, newStroke.maxY
+                )
+                dist < threshold && existing.noteId == currentNoteId && existing.categoryName == categoryName
+            }
+
+            if (nearbyStroke != null) {
+                // Merge with existing
+                val updatedElements = nearbyStroke.serializedElements + newStroke.toSerializable()
+                val updatedStroke = nearbyStroke.copy(
+                    serializedElements = updatedElements,
+                    minX = min(nearbyStroke.minX, newStroke.minX),
+                    minY = min(nearbyStroke.minY, newStroke.minY),
+                    maxX = max(nearbyStroke.maxX, newStroke.maxX),
+                    maxY = max(nearbyStroke.maxY, newStroke.maxY),
+                    timestamp = System.currentTimeMillis()
+                )
+                importantStrokeDao.insertOrUpdate(updatedStroke)
+            } else {
+                // Create new entry
+                val newImportantStroke = ImportantStrokeEntity(
+                    folderName = folder,
+                    noteId = currentNoteId,
+                    noteTitle = _currentNoteTitle.value,
+                    serializedElements = listOf(newStroke.toSerializable()),
+                    minX = newStroke.minX,
+                    maxX = newStroke.maxX,
+                    minY = newStroke.minY,
+                    maxY = newStroke.maxY,
+                    colorArgb = categoryColor,
+                    categoryName = categoryName
+                )
+                importantStrokeDao.insertOrUpdate(newImportantStroke)
+            }
+        }
+    }
+
+    fun removeImportantStrokes(erasedElements: List<CanvasElement>) {
+        val erasedIds = erasedElements.map { it.id }.toSet()
+        viewModelScope.launch(Dispatchers.IO) {
+            val folder = _currentFolder.value
+            val existingStrokes = importantStrokeDao.getImportantStrokesForFolderSync(folder)
+            
+            existingStrokes.forEach { importantStroke ->
+                val remainingElements = importantStroke.serializedElements.filterNot { it.id in erasedIds }
+                
+                if (remainingElements.size < importantStroke.serializedElements.size) {
+                    if (remainingElements.isEmpty()) {
+                        importantStrokeDao.delete(importantStroke)
+                    } else {
+                        // Re-calculate bounds
+                        var minX = Float.MAX_VALUE
+                        var minY = Float.MAX_VALUE
+                        var maxX = -Float.MAX_VALUE
+                        var maxY = -Float.MAX_VALUE
+                        
+                        remainingElements.forEach { 
+                            minX = min(minX, it.minX)
+                            minY = min(minY, it.minY)
+                            maxX = max(maxX, it.maxX)
+                            maxY = max(maxY, it.maxY)
+                        }
+                        
+                        val updatedStroke = importantStroke.copy(
+                            serializedElements = remainingElements,
+                            minX = minX,
+                            minY = minY,
+                            maxX = maxX,
+                            maxY = maxY,
+                            timestamp = System.currentTimeMillis()
+                        )
+                        importantStrokeDao.insertOrUpdate(updatedStroke)
+                    }
+                }
+            }
+        }
+    }
+
+    fun deleteImportantStroke(stroke: ImportantStrokeEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            importantStrokeDao.delete(stroke)
+        }
+    }
+
+    private fun distanceBetweenRects(
+        ax1: Float, ay1: Float, ax2: Float, ay2: Float,
+        bx1: Float, by1: Float, bx2: Float, by2: Float
+    ): Float {
+        val dx = max(0f, max(ax1 - bx2, bx1 - ax2))
+        val dy = max(0f, max(ay1 - by2, by1 - ay2))
+        return sqrt(dx * dx + dy * dy)
     }
 
     fun moveNoteToFolder(noteId: String, newFolder: String) {
@@ -171,6 +358,16 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
                 withContext(Dispatchers.IO) {
                     noteDao.insertOrUpdateNote(updatedNote)
                 }
+            }
+        }
+    }
+
+    fun deleteNote(note: NoteEntity) {
+        viewModelScope.launch(Dispatchers.IO) {
+            noteDao.deleteNote(note)
+            val file = File(context.filesDir, "${note.noteId}.json")
+            if (file.exists()) {
+                file.delete()
             }
         }
     }
@@ -282,14 +479,18 @@ class NoteViewModel(private val context: Context, private val noteDao: NoteDao) 
     }
 }
 
+
+
 class NoteViewModelFactory(
     private val context: Context,
-    private val noteDao: NoteDao
+    private val noteDao: NoteDao,
+    private val importantStrokeDao: ImportantStrokeDao,
+    private val importantCategoryDao: ImportantCategoryDao
 ) : ViewModelProvider.Factory {
     override fun <T : ViewModel> create(modelClass: Class<T>, extras: CreationExtras): T {
         if (modelClass.isAssignableFrom(NoteViewModel::class.java)) {
             @Suppress("UNCHECKED_CAST")
-            return NoteViewModel(context, noteDao) as T
+            return NoteViewModel(context, noteDao, importantStrokeDao, importantCategoryDao) as T
         }
         throw IllegalArgumentException("Unknown ViewModel class")
     }

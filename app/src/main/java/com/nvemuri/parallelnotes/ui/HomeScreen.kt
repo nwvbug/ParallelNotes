@@ -1,6 +1,7 @@
 package com.nvemuri.parallelnotes.ui
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -9,6 +10,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
@@ -16,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
@@ -36,9 +39,16 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.nvemuri.parallelnotes.R
 import com.nvemuri.parallelnotes.data.NoteEntity
+import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
+import com.nvemuri.parallelnotes.data.toCanvasElement
+import com.nvemuri.parallelnotes.utils.drawStroke
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import androidx.compose.ui.graphics.drawscope.withTransform
+import androidx.compose.ui.graphics.drawscope.translate
+import androidx.compose.ui.graphics.drawscope.scale
+import androidx.compose.ui.geometry.Offset
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -49,10 +59,13 @@ fun HomeScreen(
     // Observe database state
     val notes by viewModel.allNotes.collectAsState()
     val folders by viewModel.allFolders.collectAsState()
+    val importantStrokes by viewModel.importantStrokes.collectAsState()
+    val selectedFolder by viewModel.currentFolder.collectAsState()
 
-    var selectedFolder by remember { mutableStateOf("MyFolder") }
     var showCreateFolderDialog by remember { mutableStateOf(false) }
-    var showMoveNoteDialog by remember { mutableStateOf<NoteEntity?>(null) }
+    var noteToManage by remember { mutableStateOf<NoteEntity?>(null) }
+    var noteToDelete by remember { mutableStateOf<NoteEntity?>(null) }
+    var strokeToDelete by remember { mutableStateOf<ImportantStrokeEntity?>(null) }
     
     // Track folders locally so new ones show up immediately before they have notes
     var localFolders by remember(folders) { mutableStateOf(folders) }
@@ -61,6 +74,9 @@ fun HomeScreen(
 
     // Filter notes based on selection
     val filteredNotes = notes.filter { it.folder == selectedFolder }
+
+    // Group important strokes by category
+    val groupedStrokes = importantStrokes.groupBy { it.categoryName }
 
     Scaffold(
         containerColor = Color(0xFFebebeb),
@@ -149,33 +165,98 @@ fun HomeScreen(
                     Folder(
                         folderName = folder,
                         isSelected = selectedFolder == folder,
-                        onClick = { selectedFolder = folder }
+                        onClick = { 
+                            viewModel.updateFolder(folder)
+                        }
                     )
                 }
             }
             
-            LazyVerticalGrid(
-                columns = GridCells.Adaptive(minSize = 150.dp),
-                modifier = Modifier
-                    .weight(1f)
-                    .fillMaxSize()
-                    .padding(horizontal = 8.dp),
-                contentPadding = PaddingValues(bottom = 88.dp),
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                items(filteredNotes, key = { it.noteId }) { note ->
-                    NoteCard(
-                        title = note.title,
-                        timestamp = note.lastModified,
-                        onClick = {
-                            viewModel.loadNote(note.noteId)
-                            onNavigateToNote()
-                        },
-                        onLongClick = {
-                            showMoveNoteDialog = note
-                        }
+            Column(modifier = Modifier.weight(1f)) {
+                // Important Strokes Pane - Horizontal Category Panels
+                if (importantStrokes.isNotEmpty()) {
+                    Text(
+                        "Important Summaries",
+                        fontWeight = FontWeight.Bold, 
+                        modifier = Modifier.padding(8.dp)
                     )
+                    LazyRow(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(280.dp)
+                            .padding(8.dp),
+                        horizontalArrangement = Arrangement.spacedBy(16.dp),
+                        contentPadding = PaddingValues(end = 16.dp)
+                    ) {
+                        // Put "Important" first, then sort the rest alphabetically
+                        val sortedCategories = groupedStrokes.keys.sortedByDescending { it == "Important" }
+                        
+                        items(sortedCategories) { categoryName ->
+                            val strokesInCategory = groupedStrokes[categoryName] ?: emptyList()
+                            val firstStroke = strokesInCategory.firstOrNull()
+                            val categoryColor = if (firstStroke != null) Color(firstStroke.colorArgb) else Color.Black
+
+                            Column(
+                                modifier = Modifier
+                                    .width(300.dp)
+                                    .fillMaxHeight()
+                                    .border(3.dp, categoryColor, RoundedCornerShape(16.dp))
+                                    .clip(RoundedCornerShape(16.dp))
+                                    .background(Color.White)
+                                    .padding(8.dp)
+                            ) {
+                                Text(
+                                    text = categoryName,
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = categoryColor,
+                                    style = MaterialTheme.typography.titleMedium,
+                                    modifier = Modifier.padding(start = 4.dp, bottom = 8.dp)
+                                )
+                                LazyColumn(
+                                    modifier = Modifier.fillMaxSize(),
+                                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                                    contentPadding = PaddingValues(bottom = 8.dp)
+                                ) {
+                                    items(strokesInCategory) { stroke ->
+                                        ImportantStrokeCard(
+                                            stroke = stroke,
+                                            onClick = {
+                                                viewModel.loadNote(stroke.noteId)
+                                                onNavigateToNote()
+                                            },
+                                            onLongClick = {
+                                                strokeToDelete = stroke
+                                            }
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                LazyVerticalGrid(
+                    columns = GridCells.Adaptive(minSize = 150.dp),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(horizontal = 8.dp),
+                    contentPadding = PaddingValues(bottom = 88.dp),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    items(filteredNotes, key = { it.noteId }) { note ->
+                        NoteCard(
+                            title = note.title,
+                            timestamp = note.lastModified,
+                            onClick = {
+                                viewModel.loadNote(note.noteId)
+                                onNavigateToNote()
+                            },
+                            onLongClick = {
+                                noteToManage = note
+                            }
+                        )
+                    }
                 }
             }
         }
@@ -189,52 +270,175 @@ fun HomeScreen(
                     if (!localFolders.contains(newFolderName)) {
                         localFolders = localFolders + newFolderName
                     }
-                    selectedFolder = newFolderName
+                    viewModel.updateFolder(newFolderName)
                 }
             }
         )
     }
 
-    if (showMoveNoteDialog != null) {
-        MoveNoteDialog(
-            noteTitle = showMoveNoteDialog?.title ?: "Untitled Note",
+    if (noteToManage != null) {
+        NoteOptionsDialog(
+            note = noteToManage!!,
             folders = displayFolders,
-            onDismiss = { showMoveNoteDialog = null },
-            onConfirm = { targetFolder ->
-                showMoveNoteDialog?.let { note ->
+            onDismiss = { noteToManage = null },
+            onMove = { targetFolder ->
+                noteToManage?.let { note ->
                     viewModel.moveNoteToFolder(note.noteId, targetFolder)
                 }
-                showMoveNoteDialog = null
+                noteToManage = null
+            },
+            onDelete = {
+                noteToDelete = noteToManage
+                noteToManage = null
+            }
+        )
+    }
+
+    if (noteToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { noteToDelete = null },
+            title = { Text("Delete Note?") },
+            text = { Text("Are you sure you want to delete '${if(noteToDelete?.title?.isBlank() == true) "Untitled Note" else noteToDelete?.title}'? This action cannot be undone.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        noteToDelete?.let { viewModel.deleteNote(it) }
+                        noteToDelete = null
+                    }
+                ) {
+                    Text("Delete", color = Color.Red, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { noteToDelete = null }) {
+                    Text("Cancel", color = Color.Black)
+                }
+            }
+        )
+    }
+
+    if (strokeToDelete != null) {
+        AlertDialog(
+            onDismissRequest = { strokeToDelete = null },
+            title = { Text("Delete Important Writing?") },
+            text = { Text("This will remove the writing from the summary pane, but NOT from the original note.") },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        strokeToDelete?.let { viewModel.deleteImportantStroke(it) }
+                        strokeToDelete = null
+                    }
+                ) {
+                    Text("Delete", color = Color.Red, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { strokeToDelete = null }) {
+                    Text("Cancel", color = Color.Black)
+                }
             }
         )
     }
 }
 
+@OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun MoveNoteDialog(
-    noteTitle: String,
+fun ImportantStrokeCard(
+    stroke: ImportantStrokeEntity, 
+    onClick: () -> Unit,
+    onLongClick: () -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .combinedClickable(
+                onClick = onClick,
+                onLongClick = onLongClick
+            ),
+        colors = CardDefaults.cardColors(containerColor = Color.White),
+        border = BorderStroke(2.dp, Color(stroke.colorArgb)),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .padding(8.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceBetween
+        ) {
+            // Render the strokes in a small canvas
+            Box(modifier = Modifier.size(100.dp, 40.dp)) {
+                Canvas(modifier = Modifier.fillMaxSize()) {
+                    val elements = stroke.serializedElements.map { it.toCanvasElement() }
+                    val padding = 10f
+                    val scaleX = (size.width - padding * 2) / (stroke.maxX - stroke.minX).coerceAtLeast(1f)
+                    val scaleY = (size.height - padding * 2) / (stroke.maxY - stroke.minY).coerceAtLeast(1f)
+                    val scale = minOf(scaleX, scaleY)
+
+                    withTransform({
+                        translate(padding, padding)
+                        scale(scale, scale, Offset.Zero)
+                        translate(-stroke.minX, -stroke.minY)
+                    }) {
+                        elements.forEach { element ->
+                            if (element is com.nvemuri.parallelnotes.data.entities.PenStroke) {
+                                drawStroke(element, element.thickness)
+                            }
+                        }
+                    }
+                }
+            }
+            Text(
+                text = stroke.noteTitle,
+                style = MaterialTheme.typography.bodySmall,
+                color = Color.Gray,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+    }
+}
+
+@Composable
+fun NoteOptionsDialog(
+    note: NoteEntity,
     folders: List<String>,
     onDismiss: () -> Unit,
-    onConfirm: (String) -> Unit
+    onMove: (String) -> Unit,
+    onDelete: () -> Unit
 ) {
+    val noteTitle = if (note.title.isBlank()) "Untitled Note" else note.title
+    
     AlertDialog(
         onDismissRequest = onDismiss,
-        title = { Text("Move '${if(noteTitle.isBlank()) "Untitled Note" else noteTitle}' to...") },
+        title = { Text(noteTitle) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
-                folders.forEach { folder ->
+                Text("Move to...", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
+                folders.filter { it != note.folder }.forEach { folder ->
                     TextButton(
-                        onClick = { onConfirm(folder) },
+                        onClick = { onMove(folder) },
                         modifier = Modifier.fillMaxWidth()
                     ) {
                         Text(folder, color = Color.Black, textAlign = TextAlign.Center)
                     }
-                    HorizontalDivider()
+                }
+                
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                
+                TextButton(
+                    onClick = onDelete,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.textButtonColors(contentColor = Color.Red)
+                ) {
+                    Icon(Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(18.dp))
+                    Spacer(Modifier.width(8.dp))
+                    Text("Delete Note")
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) { Text("Cancel", color = Color.Gray) }
+            TextButton(onClick = onDismiss) { Text("Close", color = Color.Gray) }
         }
     )
 }

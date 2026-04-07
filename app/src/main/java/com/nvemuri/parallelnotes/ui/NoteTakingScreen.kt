@@ -74,6 +74,8 @@ import java.util.UUID
 import android.content.Intent
 import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalContext
+import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
+import com.nvemuri.parallelnotes.data.entities.toSerializable
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -82,9 +84,10 @@ class MainActivity : ComponentActivity() {
         // 1. Initialize the database
         val database = AppDatabase.getDatabase(applicationContext)
         val noteDao = database.noteDao()
+        val importantStrokeDao = database.importantStrokeDao()
+        val importantCategoryDao = database.importantCategoryDao()
 
-// THE FIX: Pass the applicationContext into the factory!
-        val viewModelFactory = NoteViewModelFactory(applicationContext, noteDao)
+        val viewModelFactory = NoteViewModelFactory(applicationContext, noteDao, importantStrokeDao, importantCategoryDao)
 
         setContent {
             // Grab the ViewModel
@@ -120,6 +123,10 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     // More Options Menu
     var isMoreMenuOpen by remember { mutableStateOf(false) }
     val context = LocalContext.current
+
+    // Important Pen Menu
+    var isImportantPenMenuOpen by remember { mutableStateOf(false) }
+    val selectedImportantCategory by viewModel.selectedImportantCategory.collectAsState()
 
     Box(modifier = Modifier.fillMaxSize()){
         DrawingCanvas(currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke, removeJitterAmount, viewModel)
@@ -159,6 +166,30 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
                         painter = painterResource(id = R.drawable.draw),
                         contentDescription = "Draw Tool",
                         tint = tint,
+                        modifier = Modifier.padding(6.dp)
+                    )
+                }
+
+                val isImportant = currentTool == ActiveTool.IMPORTANT_PEN
+                IconButton(onClick = {
+                    if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                        isImportantPenMenuOpen = !isImportantPenMenuOpen
+                    } else {
+                        currentTool = ActiveTool.IMPORTANT_PEN
+                        isImportantPenMenuOpen = false
+                    }
+                },
+                    modifier = Modifier.border(
+                        width = if (isImportant) 3.dp else 0.dp,
+                        color = if (isImportant) Color.Black else Color.Transparent,
+                        shape = CircleShape
+                    )
+                ) {
+                    val iconColor = if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
+                    Icon(
+                        painter = painterResource(id = R.drawable.temp_important_stroke_icon),
+                        contentDescription = "Important Pen",
+                        tint = iconColor,
                         modifier = Modifier.padding(6.dp)
                     )
                 }
@@ -208,7 +239,7 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
                     )
                 ) {
                     Icon(
-                        painter = painterResource(id = R.drawable.more), // Temp icon
+                        painter = painterResource(id = R.drawable.more), 
                         contentDescription = "More Options",
                         modifier = Modifier.padding(6.dp)
                     )
@@ -270,6 +301,28 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
                     onJitterChange = { removeJitterAmount = it },
                     onColorPickerClick = { isColorSelectorOpen = true }
                 )
+            }
+        }
+
+        if (isImportantPenMenuOpen) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .pointerInput(Unit) {
+                        awaitEachGesture {
+                            val down = awaitFirstDown()
+                            down.consume()
+                            isImportantPenMenuOpen = false
+                        }
+                    }
+            )
+
+            Box(
+                modifier = Modifier
+                    .align(Alignment.CenterStart)
+                    .padding(start = 105.dp)
+            ) {
+                ImportantPenMenu(viewModel = viewModel)
             }
         }
 
@@ -357,6 +410,7 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
 
 enum class ActiveTool {
     DRAW,
+    IMPORTANT_PEN,
     ERASESTROKE,
     LASSO
 }
@@ -381,7 +435,7 @@ fun DrawingCanvas(
 ) {
     val loadedElements by viewModel.currentElements.collectAsState()
     //Drawing States (Vector)
-    var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) } //change this to emptyList CanvasElement later
+    var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) } 
     var currentRawStroke by remember { mutableStateOf(emptyList<Point>())}
 
     //Cursor State
@@ -404,7 +458,7 @@ fun DrawingCanvas(
     // Start zoomed out (0.5x) to give a larger overview by default
     var viewportScale by remember { mutableFloatStateOf(0.5f) }
 
-
+    val selectedImportantCategory by viewModel.selectedImportantCategory.collectAsState()
 
     // screen coord to actual canvas coord
     val screenToWorld: (Offset) -> Offset = { screenPos ->
@@ -518,7 +572,7 @@ fun DrawingCanvas(
                     }
                 }
             }
-            .pointerInput(currentTool, removeJitterAmount, smoothCurrentStroke, arcSmoothing, pencolor, thickness){
+            .pointerInput(currentTool, removeJitterAmount, smoothCurrentStroke, arcSmoothing, pencolor, thickness, selectedImportantCategory){
                 awaitEachGesture {
                     // POINTER DOWN
                     val down = awaitFirstDown()
@@ -526,7 +580,7 @@ fun DrawingCanvas(
 
                     // check if its a stylus and get pressure
                     val isStylus = down.type == PointerType.Stylus
-                    if (!isStylus && (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.ERASESTROKE)) return@awaitEachGesture //only take pen for drawing
+                    if (!isStylus && (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN || currentTool == ActiveTool.ERASESTROKE)) return@awaitEachGesture //only take pen for drawing
                     val startPressure = down.pressure
 
                     // Streamline stuff (position)
@@ -540,7 +594,7 @@ fun DrawingCanvas(
                     val maxVelo = 5.0f // may need to be tweaked
 
                     //make a single dot if just tapped
-                    if (currentTool == ActiveTool.DRAW) {
+                    if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
                         currentRawStroke = listOf(Point(screenToWorld(down.position), startPressure))
 
                     }
@@ -609,7 +663,7 @@ fun DrawingCanvas(
                         if (change.pressed) {
                             change.consume()
                             val stylusPos = screenToWorld(change.position) //position of actual pointer
-                            if (currentTool == ActiveTool.DRAW) {
+                            if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
                                 val movePressure = if (change.type == PointerType.Stylus) change.pressure else 1.0f
 
                                 val currentTime = change.uptimeMillis
@@ -670,6 +724,9 @@ fun DrawingCanvas(
                                 if (toErase.isNotEmpty()) {
                                     // Remove them from the main list immediately
                                     canvasElements = canvasElements.filterNot { it in toErase }
+                                    
+                                    // Notify ViewModel to remove from important strokes
+                                    viewModel.removeImportantStrokes(toErase)
 
                                     // Figure out which chunks need to be redrawn
                                     val dirtyChunkKeys = mutableSetOf<String>()
@@ -743,7 +800,7 @@ fun DrawingCanvas(
                     }
 
                     // IF DRAW, ADD LAST STROKE TO COMPLETED
-                    if (currentTool == ActiveTool.DRAW && currentRawStroke.isNotEmpty()) {
+                    if ((currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) && currentRawStroke.isNotEmpty()) {
                         //Convert new strokes to pictures so they can be displayed and moved efficiently
                         //first find the size of the picture
                         var minX = Float.MAX_VALUE
@@ -776,8 +833,12 @@ fun DrawingCanvas(
                         val nativeCanvas: NativeCanvas = picture.beginRecording(width, height)
 
                         //actually draw and take the picture
+                        val actualColor = if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                            if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
+                        } else pencolor
+                        
                         val nativePaint = NativePaint().apply {
-                            color = pencolor.toArgb() // Convert Compose Color to Native Color
+                            color = actualColor.toArgb() 
                             isAntiAlias = true
                             strokeCap = Cap.ROUND
                             strokeJoin = Join.ROUND
@@ -819,7 +880,7 @@ fun DrawingCanvas(
                             arcSmoothing = arcSmoothing,
                             picture = picture,
                             thickness = thickness,
-                            color = pencolor,
+                            color = actualColor,
                             minX = minX, minY = minY, maxX = maxX, maxY = maxY
                         )
                         //find the chunk keys that need to be updated
@@ -846,6 +907,11 @@ fun DrawingCanvas(
                         // 3. Update states
                         cacheVersion++
                         canvasElements = canvasElements + newStroke
+                        
+                        if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                            viewModel.processImportantStroke(newStroke)
+                        }
+
                         currentRawStroke = emptyList()
                     }
                 }
@@ -874,6 +940,10 @@ fun DrawingCanvas(
                 } else {
                     currentRawStroke
                 }
+                val actualColor = if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                    if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
+                } else pencolor
+
                 val currentStroke = PenStroke(
                     id = "temp",
                     zIndex = 0f,
@@ -881,7 +951,7 @@ fun DrawingCanvas(
                     points = strokeToDraw,
                     arcSmoothing = arcSmoothing,
                     thickness = thickness,
-                    color = pencolor,
+                    color = actualColor,
                     picture = Picture(),
                     minX = 0f,
                     minY = 0f,
@@ -927,10 +997,14 @@ fun DrawingCanvas(
         // non transformed things
         // move the cursor
         cursorPosition?.let { pos ->
-            if (currentTool == ActiveTool.DRAW) {
+            if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
+                val cursorColor = if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                    if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
+                } else Color.Black
+
                 // A small, solid black dot
                 drawCircle(
-                    color = Color.Black,
+                    color = cursorColor,
                     radius = 5f,
                     center = pos,
                     style = Stroke(width = 2f)
@@ -946,6 +1020,112 @@ fun DrawingCanvas(
             }
         }
     }
+}
+
+@Composable
+fun ImportantPenMenu(viewModel: NoteViewModel) {
+    val categories by viewModel.importantCategories.collectAsState()
+    val selectedCategory by viewModel.selectedImportantCategory.collectAsState()
+    var showCreateDialog by remember { mutableStateOf(false) }
+
+    Surface(
+        shape = RoundedCornerShape(16.dp),
+        border = BorderStroke(3.dp, Color.Black),
+        color = Color.White,
+        shadowElevation = 8.dp,
+        modifier = Modifier.width(300.dp)
+    ) {
+        Column(modifier = Modifier.padding(16.dp)) {
+            Text("Categories", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            
+            // Default "Important" category (pseudo-category)
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clickable { viewModel.selectImportantCategory(null) }
+                    .background(if (selectedCategory == null) Color.LightGray else Color.Transparent)
+                    .padding(8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(modifier = Modifier.size(24.dp).background(Color(0xFFFFD700), CircleShape))
+                Spacer(modifier = Modifier.width(12.dp))
+                Text("Default")
+            }
+
+            categories.forEach { category ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { viewModel.selectImportantCategory(category) }
+                        .background(if (selectedCategory?.name == category.name) Color.LightGray else Color.Transparent)
+                        .padding(8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Box(modifier = Modifier.size(24.dp).background(Color(category.colorArgb), CircleShape))
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Text(category.name, modifier = Modifier.weight(1f))
+                    IconButton(onClick = { viewModel.deleteImportantCategory(category) }) {
+                        Icon(painterResource(id = R.drawable.erase), contentDescription = "Delete", modifier = Modifier.size(16.dp))
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+            Button(
+                onClick = { showCreateDialog = true },
+                modifier = Modifier.fillMaxWidth(),
+                colors = ButtonDefaults.buttonColors(containerColor = Color.Black)
+            ) {
+                Text("Create New Category")
+            }
+        }
+    }
+
+    if (showCreateDialog) {
+        CreateCategoryDialog(
+            onDismiss = { showCreateDialog = false },
+            onConfirm = { name, color ->
+                viewModel.createImportantCategory(name, color.toArgb())
+            }
+        )
+    }
+}
+
+@Composable
+fun CreateCategoryDialog(onDismiss: () -> Unit, onConfirm: (String, Color) -> Unit) {
+    var name by remember { mutableStateOf("") }
+    var selectedColor by remember { mutableStateOf(Color.Red) }
+    val colors = listOf(Color.Red, Color.Green, Color.Blue, Color.Cyan, Color.Magenta, Color.Yellow, Color.Gray, Color.Black)
+
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("New Category") },
+        text = {
+            Column {
+                OutlinedTextField(value = name, onValueChange = { name = it }, label = { Text("Name") })
+                Spacer(modifier = Modifier.height(16.dp))
+                LazyVerticalGrid(columns = GridCells.Fixed(4), modifier = Modifier.height(100.dp)) {
+                    items(colors) { color ->
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .padding(4.dp)
+                                .background(color, CircleShape)
+                                .border(if (selectedColor == color) 2.dp else 0.dp, Color.Black, CircleShape)
+                                .clickable { selectedColor = color }
+                        )
+                    }
+                }
+            }
+        },
+        confirmButton = {
+            TextButton(onClick = { onConfirm(name, selectedColor); onDismiss() }) { Text("Create") }
+        },
+        dismissButton = {
+            TextButton(onClick = onDismiss) { Text("Cancel") }
+        }
+    )
 }
 
 @Composable
