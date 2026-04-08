@@ -248,6 +248,7 @@ fun HomeScreen(
                         NoteCard(
                             title = note.title,
                             timestamp = note.lastModified,
+                            borderColor = Color(note.colorArgb),
                             onClick = {
                                 viewModel.loadNote(note.noteId)
                                 onNavigateToNote()
@@ -290,6 +291,11 @@ fun HomeScreen(
             onDelete = {
                 noteToDelete = noteToManage
                 noteToManage = null
+            },
+            onColorChange = { colorArgb ->
+                noteToManage?.let { note ->
+                    viewModel.updateNoteColor(note.noteId, colorArgb)
+                }
             }
         )
     }
@@ -405,22 +411,74 @@ fun NoteOptionsDialog(
     folders: List<String>,
     onDismiss: () -> Unit,
     onMove: (String) -> Unit,
-    onDelete: () -> Unit
+    onDelete: () -> Unit,
+    onColorChange: (Int) -> Unit
 ) {
     val noteTitle = if (note.title.isBlank()) "Untitled Note" else note.title
+    
+    val colorPalette = listOf(
+        0xFF000000.toInt(), // Black
+        0xFFE53935.toInt(), // Red
+        0xFFFF9800.toInt(), // Orange
+        0xFFFFEB3B.toInt(), // Yellow
+        0xFF4CAF50.toInt(), // Green
+        0xFF2196F3.toInt(), // Blue
+        0xFF9C27B0.toInt(), // Purple
+        0xFFE91E63.toInt(), // Pink
+        0xFF795548.toInt(), // Brown
+        0xFF607D8B.toInt(), // Blue Grey
+        0xFF009688.toInt(), // Teal
+        0xFF3F51B5.toInt()  // Indigo
+    )
     
     AlertDialog(
         onDismissRequest = onDismiss,
         title = { Text(noteTitle) },
         text = {
             Column(modifier = Modifier.fillMaxWidth()) {
+                Text("Border Color", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    colorPalette.chunked(6).forEach { rowColors ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.SpaceEvenly
+                        ) {
+                            rowColors.forEach { colorInt ->
+                                val isSelected = note.colorArgb == colorInt
+                                Box(
+                                    modifier = Modifier
+                                        .size(36.dp)
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(Color(colorInt))
+                                        .border(
+                                            width = if (isSelected) 3.dp else 1.dp,
+                                            color = if (isSelected) Color.Blue else Color.Gray,
+                                            shape = RoundedCornerShape(8.dp)
+                                        )
+                                        .clickable { onColorChange(colorInt) }
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(4.dp))
+                    }
+                }
+                
+                HorizontalDivider(modifier = Modifier.padding(vertical = 12.dp))
+                
                 Text("Move to...", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold, modifier = Modifier.padding(vertical = 8.dp))
-                folders.filter { it != note.folder }.forEach { folder ->
-                    TextButton(
-                        onClick = { onMove(folder) },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text(folder, color = Color.Black, textAlign = TextAlign.Center)
+                if (folders.filter { it != note.folder }.isEmpty()) {
+                    Text("No other folders", color = Color.Gray, modifier = Modifier.padding(8.dp))
+                } else {
+                    folders.filter { it != note.folder }.forEach { folder ->
+                        TextButton(
+                            onClick = { onMove(folder) },
+                            modifier = Modifier.fillMaxWidth()
+                        ) {
+                            Text(folder, color = Color.Black, textAlign = TextAlign.Center)
+                        }
                     }
                 }
                 
@@ -509,6 +567,7 @@ fun Folder(folderName: String, isSelected : Boolean, onClick: () -> Unit) {
 fun NoteCard(
     title: String, 
     timestamp: Long, 
+    borderColor: Color,
     onClick: () -> Unit,
     onLongClick: () -> Unit
 ) {
@@ -526,7 +585,7 @@ fun NoteCard(
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
         colors = CardDefaults.cardColors(containerColor = Color.White),
         shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(3.dp, Color.Black)
+        border = BorderStroke(3.dp, borderColor)
     ) {
         Column(
             modifier = Modifier

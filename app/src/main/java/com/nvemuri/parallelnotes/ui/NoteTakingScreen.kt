@@ -35,6 +35,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.draw.clip
@@ -60,6 +61,9 @@ import android.graphics.Canvas as NativeCanvas
 import android.graphics.Paint.Cap
 import android.graphics.Paint.Join
 import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.geometry.Size
+import kotlinx.coroutines.launch
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
@@ -72,6 +76,7 @@ import com.nvemuri.parallelnotes.data.AppDatabase
 import java.util.UUID
 
 import android.content.Intent
+import androidx.compose.foundation.verticalScroll
 import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalContext
 import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
@@ -122,6 +127,7 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
 
     // More Options Menu
     var isMoreMenuOpen by remember { mutableStateOf(false) }
+    var showColorToolbar by remember { mutableStateOf(true) }
     val context = LocalContext.current
 
     // Important Pen Menu
@@ -131,122 +137,139 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     Box(modifier = Modifier.fillMaxSize()){
         DrawingCanvas(currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke, removeJitterAmount, viewModel)
 
+        Column (
+            modifier = Modifier.fillMaxHeight(),
+            verticalArrangement = Arrangement.Center
+        )
+        {
 
-        Surface(
-            modifier = Modifier
-                .align(Alignment.CenterStart)
-                .padding(16.dp),
-            shape = RoundedCornerShape(16.dp),
-            color = Color.White,
-            shadowElevation = 8.dp,
-            border = BorderStroke(3.dp, Color.Black)
-
-        ) {
-            Column(
-                modifier = Modifier.padding(12.dp),
-                verticalArrangement = Arrangement.spacedBy(8.dp)
-            ){
-                val isDraw = currentTool == ActiveTool.DRAW
-                IconButton(onClick = {
-                    if (currentTool == ActiveTool.DRAW){
-                        isPenMenuOpen = !isPenMenuOpen
-                    } else {
-                        currentTool = ActiveTool.DRAW
-                        isPenMenuOpen = false
-                    }
-                },
-                    modifier = Modifier.border(
-                        width = if (isDraw) 3.dp else 0.dp,
-                        color = if (isDraw) Color.Black else Color.Transparent,
-                        shape = CircleShape
-                    )
-                ) {
-                    var tint = penColor
-                    Icon(
-                        painter = painterResource(id = R.drawable.draw),
-                        contentDescription = "Draw Tool",
-                        tint = tint,
-                        modifier = Modifier.padding(6.dp)
-                    )
-                }
-
-                val isImportant = currentTool == ActiveTool.IMPORTANT_PEN
-                IconButton(onClick = {
-                    if (currentTool == ActiveTool.IMPORTANT_PEN) {
-                        isImportantPenMenuOpen = !isImportantPenMenuOpen
-                    } else {
-                        currentTool = ActiveTool.IMPORTANT_PEN
-                        isImportantPenMenuOpen = false
-                    }
-                },
-                    modifier = Modifier.border(
-                        width = if (isImportant) 3.dp else 0.dp,
-                        color = if (isImportant) Color.Black else Color.Transparent,
-                        shape = CircleShape
-                    )
-                ) {
-                    val iconColor = if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
-                    Icon(
-                        painter = painterResource(id = R.drawable.temp_important_stroke_icon),
-                        contentDescription = "Important Pen",
-                        tint = iconColor,
-                        modifier = Modifier.padding(6.dp)
-                    )
-                }
-
-                val isErase = currentTool == ActiveTool.ERASESTROKE
-                IconButton(onClick = {
-                    currentTool = ActiveTool.ERASESTROKE
-                },
-                    modifier = Modifier.border(
-                        width = if (isErase) 3.dp else 0.dp,
-                        color = if (isErase) Color.Black else Color.Transparent,
-                        shape = CircleShape
-                    )
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.erase),
-                        contentDescription = "Eraser Tool",
-                        modifier = Modifier.padding(6.dp)
-                    )
-                }
-
-                val isLasso = currentTool == ActiveTool.LASSO
-                IconButton(onClick = {
-                    currentTool = ActiveTool.LASSO
-                },
-                    modifier = Modifier.border(
-                        width = if (isLasso) 3.dp else 0.dp,
-                        color = if (isLasso) Color.Black else Color.Transparent,
-                        shape = CircleShape
-                    )
-                ) {
-
-                    Icon(
-                        painter = painterResource(id = R.drawable.lasso),
-                        contentDescription = "Lasso Tool",
-                        modifier = Modifier.padding(8.dp)
-                    )
-                }
-
-                // NEW: More Options Button
-                IconButton(
-                    onClick = { isMoreMenuOpen = !isMoreMenuOpen },
-                    modifier = Modifier.border(
-                        width = if (isMoreMenuOpen) 3.dp else 0.dp,
-                        color = if (isMoreMenuOpen) Color.Black else Color.Transparent,
-                        shape = CircleShape
-                    )
-                ) {
-                    Icon(
-                        painter = painterResource(id = R.drawable.more), 
-                        contentDescription = "More Options",
-                        modifier = Modifier.padding(6.dp)
-                    )
-                }
-
+            if (showColorToolbar) {
+                ColorToolbar(
+                    currentColor = penColor,
+                    onColorSelected = { penColor = it },
+                    modifier = Modifier
+//                        .align(Alignment.TopStart)
+                        .padding(start = 16.dp, top = 16.dp)
+                )
             }
+            Surface(
+                modifier = Modifier
+//                    .align(Alignment.CenterStart)
+                    .padding(16.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = Color.White,
+                shadowElevation = 8.dp,
+                border = BorderStroke(3.dp, Color.Black)
+
+            ) {
+                Column(
+                    modifier = Modifier.padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ){
+                    val isDraw = currentTool == ActiveTool.DRAW
+                    IconButton(onClick = {
+                        if (currentTool == ActiveTool.DRAW){
+                            isPenMenuOpen = !isPenMenuOpen
+                        } else {
+                            currentTool = ActiveTool.DRAW
+                            isPenMenuOpen = false
+                        }
+                    },
+                        modifier = Modifier.border(
+                            width = if (isDraw) 3.dp else 0.dp,
+                            color = if (isDraw) Color.Black else Color.Transparent,
+                            shape = CircleShape
+                        )
+                    ) {
+                        var tint = penColor
+                        Icon(
+                            painter = painterResource(id = R.drawable.draw),
+                            contentDescription = "Draw Tool",
+                            tint = tint,
+                            modifier = Modifier.padding(6.dp)
+                        )
+                    }
+
+                    val isImportant = currentTool == ActiveTool.IMPORTANT_PEN
+                    IconButton(onClick = {
+                        if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                            isImportantPenMenuOpen = !isImportantPenMenuOpen
+                        } else {
+                            currentTool = ActiveTool.IMPORTANT_PEN
+                            isImportantPenMenuOpen = false
+                        }
+                    },
+                        modifier = Modifier.border(
+                            width = if (isImportant) 3.dp else 0.dp,
+                            color = if (isImportant) Color.Black else Color.Transparent,
+                            shape = CircleShape
+                        )
+                    ) {
+                        val iconColor = if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
+                        Icon(
+                            painter = painterResource(id = R.drawable.temp_important_stroke_icon),
+                            contentDescription = "Important Pen",
+                            tint = iconColor,
+                            modifier = Modifier.padding(6.dp)
+                        )
+                    }
+
+                    val isErase = currentTool == ActiveTool.ERASESTROKE
+                    IconButton(onClick = {
+                        currentTool = ActiveTool.ERASESTROKE
+                    },
+                        modifier = Modifier.border(
+                            width = if (isErase) 3.dp else 0.dp,
+                            color = if (isErase) Color.Black else Color.Transparent,
+                            shape = CircleShape
+                        )
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.erase),
+                            contentDescription = "Eraser Tool",
+                            modifier = Modifier.padding(6.dp)
+                        )
+                    }
+
+                    val isLasso = currentTool == ActiveTool.LASSO
+                    IconButton(onClick = {
+                        currentTool = ActiveTool.LASSO
+                    },
+                        modifier = Modifier.border(
+                            width = if (isLasso) 3.dp else 0.dp,
+                            color = if (isLasso) Color.Black else Color.Transparent,
+                            shape = CircleShape
+                        )
+                    ) {
+
+                        Icon(
+                            painter = painterResource(id = R.drawable.lasso),
+                            contentDescription = "Lasso Tool",
+                            modifier = Modifier.padding(8.dp)
+                        )
+                    }
+
+                    // NEW: More Options Button
+                    IconButton(
+                        onClick = { isMoreMenuOpen = !isMoreMenuOpen },
+                        modifier = Modifier.border(
+                            width = if (isMoreMenuOpen) 3.dp else 0.dp,
+                            color = if (isMoreMenuOpen) Color.Black else Color.Transparent,
+                            shape = CircleShape
+                        )
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.more),
+                            contentDescription = "More Options",
+                            modifier = Modifier.padding(6.dp)
+                        )
+                    }
+
+                }
+            }
+
         }
+
         Surface(
             modifier = Modifier
                 .align(Alignment.BottomStart)
@@ -342,31 +365,49 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
             Surface(
                 modifier = Modifier
                     .align(Alignment.CenterStart)
-                    .padding(start = 105.dp),
+                    .padding(start = 105.dp)
+                    .width(300.dp),
                 shape = RoundedCornerShape(16.dp),
                 color = Color.White,
                 shadowElevation = 8.dp,
                 border = BorderStroke(3.dp, Color.Black)
             ) {
                 Column(modifier = Modifier.padding(16.dp)) {
-                    TextButton(onClick = {
-                        isMoreMenuOpen = false
-                        viewModel.exportToPdf { file ->
-                            if (file != null) {
-                                val uri = FileProvider.getUriForFile(
-                                    context,
-                                    "${context.packageName}.provider",
-                                    file
-                                )
-                                val intent = Intent(Intent.ACTION_SEND).apply {
-                                    type = "application/pdf"
-                                    putExtra(Intent.EXTRA_STREAM, uri)
-                                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { showColorToolbar = !showColorToolbar }
+                    ) {
+                        Text("Show Color Toolbar", modifier = Modifier.width(130.dp), color = Color.Black, fontWeight = FontWeight.Bold)
+                        Switch(
+                            checked = showColorToolbar,
+                            onCheckedChange = { showColorToolbar = it },
+                            colors = SwitchDefaults.colors(checkedTrackColor = Color.Black)
+                        )
+                    }
+                    HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
+                    TextButton(
+                        onClick = {
+                            isMoreMenuOpen = false
+                            viewModel.exportToPdf { file ->
+                                if (file != null) {
+                                    val uri = FileProvider.getUriForFile(
+                                        context,
+                                        "${context.packageName}.provider",
+                                        file
+                                    )
+                                    val intent = Intent(Intent.ACTION_SEND).apply {
+                                        type = "application/pdf"
+                                        putExtra(Intent.EXTRA_STREAM, uri)
+                                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                    }
+                                    context.startActivity(Intent.createChooser(intent, "Share Note PDF"))
                                 }
-                                context.startActivity(Intent.createChooser(intent, "Share Note PDF"))
                             }
-                        }
-                    }) {
+                        },
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
                         Text("Export to PDF", color = Color.Black, fontWeight = FontWeight.Bold)
                     }
                 }
@@ -459,6 +500,24 @@ fun DrawingCanvas(
     var viewportScale by remember { mutableFloatStateOf(0.5f) }
 
     val selectedImportantCategory by viewModel.selectedImportantCategory.collectAsState()
+    val lastProcessedBounds by viewModel.lastProcessedStrokeBounds.collectAsState()
+    
+    val coroutineScope = rememberCoroutineScope()
+
+    // Bounding box confirmation state for Important Pen
+    var confirmedBoundingBox by remember { mutableStateOf<Rect?>(null) }
+    var confirmedCategoryColor by remember { mutableStateOf<Color?>(null) }
+    var boundingBoxJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
+    
+    // Track the pending bounds from ViewModel
+    var pendingBoundsInfo by remember { mutableStateOf<NoteViewModel.StrokeBoundsInfo?>(null) }
+    
+    // React to ViewModel's bounds updates
+    LaunchedEffect(lastProcessedBounds) {
+        lastProcessedBounds?.let { boundsInfo ->
+            pendingBoundsInfo = boundsInfo
+        }
+    }
 
     // screen coord to actual canvas coord
     val screenToWorld: (Offset) -> Offset = { screenPos ->
@@ -592,6 +651,13 @@ fun DrawingCanvas(
                     var lastHardwarePos = screenToWorld(down.position)
 
                     val maxVelo = 5.0f // may need to be tweaked
+
+                    // Cancel bounding box display when user starts drawing
+                    if (currentTool == ActiveTool.IMPORTANT_PEN) {
+                        boundingBoxJob?.cancel()
+                        confirmedBoundingBox = null
+                        confirmedCategoryColor = null
+                    }
 
                     //make a single dot if just tapped
                     if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
@@ -910,6 +976,27 @@ fun DrawingCanvas(
                         
                         if (currentTool == ActiveTool.IMPORTANT_PEN) {
                             viewModel.processImportantStroke(newStroke)
+                            
+                            // Cancel any existing timer
+                            boundingBoxJob?.cancel()
+                            
+                            // Launch debounce timer
+                            boundingBoxJob = coroutineScope.launch {
+                                // Debounce: wait 300ms for user to stop drawing
+                                kotlinx.coroutines.delay(300)
+                                
+                                // Use the latest pending bounds (from ViewModel)
+                                pendingBoundsInfo?.let { boundsInfo ->
+                                    confirmedBoundingBox = Rect(boundsInfo.minX, boundsInfo.minY, boundsInfo.maxX, boundsInfo.maxY)
+                                    confirmedCategoryColor = Color(boundsInfo.colorArgb)
+                                    
+                                    // Auto-hide after 1 second
+                                    kotlinx.coroutines.delay(1000)
+                                    confirmedBoundingBox = null
+                                    confirmedCategoryColor = null
+                                    pendingBoundsInfo = null
+                                }
+                            }
                         }
 
                         currentRawStroke = emptyList()
@@ -990,6 +1077,34 @@ fun DrawingCanvas(
                     style = Stroke(
                         width = 3f,
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(15f, 15f), 0f)
+                    )
+                )
+            }
+
+            // Draw bounding box confirmation for Important Pen
+            confirmedBoundingBox?.let { box ->
+                val boxColor = confirmedCategoryColor ?: Color(0xFFFFD700)
+                val threshold = 300f
+                val padding = 8f
+                
+                // Draw outer threshold box (shows proximity area)
+                drawRect(
+                    color = boxColor.copy(alpha = 0.2f),
+                    topLeft = Offset(box.left - threshold - padding, box.top - threshold - padding),
+                    size = Size(box.width + threshold * 2 + padding * 2, box.height + threshold * 2 + padding * 2),
+                    style = Stroke(
+                        width = 2f,
+                        pathEffect = PathEffect.dashPathEffect(floatArrayOf(20f, 10f), 0f)
+                    )
+                )
+                
+                // Draw inner bounding box (around actual stroke group with padding)
+                drawRect(
+                    color = boxColor,
+                    topLeft = Offset(box.left - padding, box.top - padding),
+                    size = Size(box.width + padding * 2, box.height + padding * 2),
+                    style = Stroke(
+                        width = 15f, //want this to be this thickness and to be solid
                     )
                 )
             }
@@ -1245,17 +1360,65 @@ fun PenCustomizationPanel(
 }
 
 @Composable
+fun ColorToolbar(
+    currentColor: Color,
+    onColorSelected: (Color) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val colors = listOf(
+        Color.Black, Color.Blue, Color.Red, Color.Green, Color.Yellow, Color.DarkGray, Color.LightGray, Color.White,
+        Color(0xFFE91E63), // Pink
+        Color(0xFFFF9800), // Orange
+        Color(0xFF4CAF50), // Lighter Green
+        Color.Cyan, Color.Magenta, Color(0xFF9C27B0) // Purple
+    )
+
+    Surface(
+        modifier = modifier
+            .width(72.dp)
+            .height(150.dp),
+        shape = RoundedCornerShape(12.dp),
+        color = Color.White,
+        shadowElevation = 8.dp,
+        border = BorderStroke(2.dp, Color.Black)
+    ) {
+        Column(
+            modifier = Modifier
+                .padding(vertical = 6.dp)
+                .verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(6.dp)
+        ) {
+            colors.forEach { color ->
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .size(28.dp)
+                        .clip(CircleShape)
+                        .background(color)
+                        .border(
+                            width = if (currentColor == color) 3.dp else 1.dp,
+                            color = if (currentColor == color) Color.Black else Color.Gray,
+                            shape = CircleShape
+                        )
+                        .clickable { onColorSelected(color) }
+                )
+            }
+        }
+    }
+}
+
+@Composable
 fun PresetColorPickerDialog(
     onDismiss: () -> Unit,
     onColorSelected: (Color) -> Unit
 ) {
     // Define your curated palette here
     val presetColors = listOf(
-        Color.Black, Color.DarkGray, Color.LightGray, Color.White,
-        Color.Red, Color(0xFFE91E63), // Pink
+        Color.Black, Color.Blue, Color.Red, Color.Green, Color.Yellow, Color.DarkGray, Color.LightGray, Color.White,
+         Color(0xFFE91E63), // Pink
         Color(0xFFFF9800), // Orange
-        Color.Yellow, Color.Green, Color(0xFF4CAF50), // Lighter Green
-        Color.Blue, Color.Cyan, Color.Magenta, Color(0xFF9C27B0) // Purple
+          Color(0xFF4CAF50), // Lighter Green
+         Color.Cyan, Color.Magenta, Color(0xFF9C27B0) // Purple
     )
 
     AlertDialog(

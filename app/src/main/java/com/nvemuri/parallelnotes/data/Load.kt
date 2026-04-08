@@ -32,7 +32,7 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
 
-@Database(entities = [NoteEntity::class, ImportantStrokeEntity::class, ImportantCategoryEntity::class], version = 4, exportSchema = false)
+@Database(entities = [NoteEntity::class, ImportantStrokeEntity::class, ImportantCategoryEntity::class], version = 5, exportSchema = false)
 @TypeConverters(CanvasDataConverter::class) 
 abstract class AppDatabase : RoomDatabase() {
     abstract fun noteDao(): NoteDao
@@ -42,6 +42,12 @@ abstract class AppDatabase : RoomDatabase() {
     companion object {
         @Volatile
         private var INSTANCE: AppDatabase? = null
+
+        private val MIGRATION_4_5 = object : Migration(4, 5) {
+            override fun migrate(db: SupportSQLiteDatabase) {
+                db.execSQL("ALTER TABLE notes ADD COLUMN colorArgb INTEGER NOT NULL DEFAULT -16777216")
+            }
+        }
 
         private val MIGRATION_3_4 = object : Migration(3, 4) {
             override fun migrate(db: SupportSQLiteDatabase) {
@@ -82,8 +88,8 @@ abstract class AppDatabase : RoomDatabase() {
                     AppDatabase::class.java,
                     "parallel_notes_database"
                 )
-                    .addMigrations(MIGRATION_3_4)
-                    .build()
+                .addMigrations(MIGRATION_3_4, MIGRATION_4_5)
+                .build()
                 INSTANCE = instance
                 instance
             }
@@ -114,7 +120,8 @@ data class NoteEntity(
     @PrimaryKey val noteId: String,
     val title: String,
     val lastModified: Long = System.currentTimeMillis(),
-    val folder: String = "MyFolder" // Default folder for new/existing notes
+    val folder: String = "MyFolder",
+    val colorArgb: Int = -16777216 // Default black (-16777216 = 0xFF000000)
 )
 
 class CanvasDataConverter {

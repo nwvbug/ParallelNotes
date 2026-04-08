@@ -17,4 +17,7 @@ interface ImportantStrokeDao {
     
     @Query("SELECT * FROM important_strokes WHERE folderName = :folderName")
     suspend fun getImportantStrokesForFolderSync(folderName: String): List<ImportantStrokeEntity>
+    
+    @Query("SELECT * FROM important_strokes WHERE folderName = :folderName AND noteId = :noteId")
+    suspend fun getImportantStrokesForNoteSync(folderName: String, noteId: String): List<ImportantStrokeEntity>
 }

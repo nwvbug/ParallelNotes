@@ -59,7 +59,18 @@ class NoteViewModel(
     private val _selectedImportantCategory = MutableStateFlow<ImportantCategoryEntity?>(null)
     val selectedImportantCategory: StateFlow<ImportantCategoryEntity?> = _selectedImportantCategory.asStateFlow()
 
+    private val _lastProcessedStrokeBounds = MutableStateFlow<StrokeBoundsInfo?>(null)
+    val lastProcessedStrokeBounds: StateFlow<StrokeBoundsInfo?> = _lastProcessedStrokeBounds.asStateFlow()
+
     private var autosaveJob: Job? = null
+
+    data class StrokeBoundsInfo(
+        val minX: Float,
+        val minY: Float,
+        val maxX: Float,
+        val maxY: Float,
+        val colorArgb: Int
+    )
 
     init {
         syncDatabaseWithFiles()
@@ -219,11 +230,15 @@ class NoteViewModel(
                     file.writeText(jsonString)
                 }
 
+                val existingNote = withContext(Dispatchers.IO) { noteDao.getNoteById(idToSave) }
+                val colorToSave = existingNote?.colorArgb ?: -16777216
+
                 val newNote = NoteEntity(
                     noteId = idToSave,
                     title = title,
                     lastModified = System.currentTimeMillis(),
-                    folder = folderToSave
+                    folder = folderToSave,
+                    colorArgb = colorToSave
                 )
                 withContext(Dispatchers.IO) {
                     noteDao.insertOrUpdateNote(newNote)
@@ -251,11 +266,9 @@ class NoteViewModel(
             
             val existingStrokes = importantStrokeDao.getImportantStrokesForFolderSync(folder)
             
-            // Proximity threshold (e.g., 100 pixels)
             val threshold = 300f
             
             val nearbyStroke = existingStrokes.find { existing ->
-                // Check if bounding boxes are close AND same category
                 val dist = distanceBetweenRects(
                     existing.minX, existing.minY, existing.maxX, existing.maxY,
                     newStroke.minX, newStroke.minY, newStroke.maxX, newStroke.maxY
@@ -263,18 +276,26 @@ class NoteViewModel(
                 dist < threshold && existing.noteId == currentNoteId && existing.categoryName == categoryName
             }
 
-            if (nearbyStroke != null) {
-                // Merge with existing
+            val combinedBounds = if (nearbyStroke != null) {
+                // Calculate combined bounding box for merged group
+                val mergedMinX = min(nearbyStroke.minX, newStroke.minX)
+                val mergedMinY = min(nearbyStroke.minY, newStroke.minY)
+                val mergedMaxX = max(nearbyStroke.maxX, newStroke.maxX)
+                val mergedMaxY = max(nearbyStroke.maxY, newStroke.maxY)
+                
+                // Update database
                 val updatedElements = nearbyStroke.serializedElements + newStroke.toSerializable()
                 val updatedStroke = nearbyStroke.copy(
                     serializedElements = updatedElements,
-                    minX = min(nearbyStroke.minX, newStroke.minX),
-                    minY = min(nearbyStroke.minY, newStroke.minY),
-                    maxX = max(nearbyStroke.maxX, newStroke.maxX),
-                    maxY = max(nearbyStroke.maxY, newStroke.maxY),
+                    minX = mergedMinX,
+                    minY = mergedMinY,
+                    maxX = mergedMaxX,
+                    maxY = mergedMaxY,
                     timestamp = System.currentTimeMillis()
                 )
                 importantStrokeDao.insertOrUpdate(updatedStroke)
+                
+                StrokeBoundsInfo(mergedMinX, mergedMinY, mergedMaxX, mergedMaxY, categoryColor)
             } else {
                 // Create new entry
                 val newImportantStroke = ImportantStrokeEntity(
@@ -290,7 +311,12 @@ class NoteViewModel(
                     categoryName = categoryName
                 )
                 importantStrokeDao.insertOrUpdate(newImportantStroke)
+                
+                StrokeBoundsInfo(newStroke.minX, newStroke.minY, newStroke.maxX, newStroke.maxY, categoryColor)
             }
+            
+            // Update state with combined bounds for UI to display
+            _lastProcessedStrokeBounds.value = combinedBounds
         }
     }
 
@@ -298,7 +324,13 @@ class NoteViewModel(
         val erasedIds = erasedElements.map { it.id }.toSet()
         viewModelScope.launch(Dispatchers.IO) {
             val folder = _currentFolder.value
-            val existingStrokes = importantStrokeDao.getImportantStrokesForFolderSync(folder)
+            val noteId = currentNoteId
+            
+            if (noteId.isEmpty()) {
+                return@launch
+            }
+            
+            val existingStrokes = importantStrokeDao.getImportantStrokesForNoteSync(folder, noteId)
             
             existingStrokes.forEach { importantStroke ->
                 val remainingElements = importantStroke.serializedElements.filterNot { it.id in erasedIds }
@@ -307,7 +339,6 @@ class NoteViewModel(
                     if (remainingElements.isEmpty()) {
                         importantStrokeDao.delete(importantStroke)
                     } else {
-                        // Re-calculate bounds
                         var minX = Float.MAX_VALUE
                         var minY = Float.MAX_VALUE
                         var maxX = -Float.MAX_VALUE
@@ -355,6 +386,18 @@ class NoteViewModel(
             val note = withContext(Dispatchers.IO) { noteDao.getNoteById(noteId) }
             if (note != null) {
                 val updatedNote = note.copy(folder = newFolder)
+                withContext(Dispatchers.IO) {
+                    noteDao.insertOrUpdateNote(updatedNote)
+                }
+            }
+        }
+    }
+
+    fun updateNoteColor(noteId: String, colorArgb: Int) {
+        viewModelScope.launch {
+            val note = withContext(Dispatchers.IO) { noteDao.getNoteById(noteId) }
+            if (note != null) {
+                val updatedNote = note.copy(colorArgb = colorArgb)
                 withContext(Dispatchers.IO) {
                     noteDao.insertOrUpdateNote(updatedNote)
                 }
