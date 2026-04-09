@@ -1,5 +1,7 @@
 package com.nvemuri.parallelnotes.ui
 
+import androidx.compose.animation.*
+import kotlinx.coroutines.delay
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
@@ -45,15 +47,27 @@ import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.layout.ContentScale
 
 import com.nvemuri.parallelnotes.R
+import com.nvemuri.parallelnotes.data.entities.ImageElement
 import com.nvemuri.parallelnotes.data.entities.PenStroke
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.utils.bezierSmoothStroke
+import com.nvemuri.parallelnotes.utils.createImagePicture
 import com.nvemuri.parallelnotes.utils.drawStroke
 import com.nvemuri.parallelnotes.utils.isPointInPolygon
+import com.nvemuri.parallelnotes.data.entities.CanvasAction
 import com.nvemuri.parallelnotes.data.entities.CanvasElement
 import com.nvemuri.parallelnotes.utils.getOverlappingChunkKeys
 import com.nvemuri.parallelnotes.data.CanvasChunk
 import com.nvemuri.parallelnotes.utils.detectMultiFingerTap
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.PickVisualMediaRequest
+import androidx.activity.result.contract.ActivityResultContracts
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
+import java.io.File
 
 import android.graphics.Picture
 import android.graphics.Paint as NativePaint
@@ -134,8 +148,16 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     var isImportantPenMenuOpen by remember { mutableStateOf(false) }
     val selectedImportantCategory by viewModel.selectedImportantCategory.collectAsState()
 
+    // Image insertion trigger
+    var shouldOpenImagePicker by remember { mutableStateOf(false) }
+
     Box(modifier = Modifier.fillMaxSize()){
-        DrawingCanvas(currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke, removeJitterAmount, viewModel)
+        DrawingCanvas(
+            currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke,
+            removeJitterAmount, viewModel,
+            shouldOpenImagePicker = shouldOpenImagePicker,
+            onImagePickerConsumed = { shouldOpenImagePicker = false }
+        )
 
         Column (
             modifier = Modifier.fillMaxHeight(),
@@ -246,6 +268,17 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
                             painter = painterResource(id = R.drawable.lasso),
                             contentDescription = "Lasso Tool",
                             modifier = Modifier.padding(8.dp)
+                        )
+                    }
+
+                    // Insert Image Button
+                    IconButton(
+                        onClick = { shouldOpenImagePicker = true }
+                    ) {
+                        Icon(
+                            painter = painterResource(id = R.drawable.image_add),
+                            contentDescription = "Insert Image",
+                            modifier = Modifier.padding(6.dp)
                         )
                     }
 
@@ -462,6 +495,8 @@ enum class PenStyle {
     HIGHLIGHTER
 }
 
+enum class ResizeHandle { TL, T, TR, L, R, BL, B, BR }
+
 
 
 @Composable
@@ -472,8 +507,43 @@ fun DrawingCanvas(
     arcSmoothing: Boolean,
     smoothCurrentStroke: Boolean,
     removeJitterAmount: Float,
-    viewModel: NoteViewModel
+    viewModel: NoteViewModel,
+    shouldOpenImagePicker: Boolean = false,
+    onImagePickerConsumed: () -> Unit = {}
 ) {
+    //Bitmap States
+    // state integer to force Compose to redraw when we mutate the bitmap
+    var cacheVersion by remember { mutableIntStateOf(0) }
+    var activeChunks by remember { mutableStateOf(mutableMapOf<String, CanvasChunk>()) }
+    val CHUNK_SIZE = 512
+    // Helper function for rebuilding chunks
+    val rebuildTargetedChunks: (List<CanvasElement>, List<String>) -> Unit = { allElements, dirtyChunkKeys ->
+        dirtyChunkKeys.forEach { key ->
+            // Get the chunk (or create it if it doesn't exist yet)
+            val chunk = activeChunks.getOrPut(key) {
+                val parts = key.split(",")
+                CanvasChunk(parts[0].toInt(), parts[1].toInt(), CHUNK_SIZE)
+            }
+
+            // Clear this specific chunk
+            chunk.clear()
+
+            // Find ALL elements that overlap this chunk's bounding box and redraw them
+            allElements.forEach { element ->
+                if (element.boundingBox.overlaps(chunk.bounds)) {
+                    // have to shift the canvas negatively by the chunk's starting position so the stroke draws in the right local spot!
+                    chunk.canvas.save()
+                    chunk.canvas.translate(-chunk.bounds.left + element.minX, -chunk.bounds.top + element.minY)
+                    chunk.canvas.drawPicture(element.picture)
+                    chunk.canvas.restore()
+                }
+            }
+        }
+        cacheVersion++ // Trigger Compose to re-render the chunks
+    }
+
+    var undoStack by remember { mutableStateOf(emptyList<CanvasAction>()) }
+    var redoStack by remember { mutableStateOf(emptyList<CanvasAction>()) }
     val loadedElements by viewModel.currentElements.collectAsState()
     //Drawing States (Vector)
     var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) } 
@@ -487,12 +557,10 @@ fun DrawingCanvas(
     var selectedElements by remember { mutableStateOf(emptyList<CanvasElement>()) }
     var isDraggingSelection by remember { mutableStateOf(false) }
     var dragLastPosition by remember { mutableStateOf(Offset.Zero) }
+    var lassoTotalDx by remember { mutableFloatStateOf(0f) }
+    var lassoTotalDy by remember { mutableFloatStateOf(0f) }
 
-    //Bitmap States
-    // state integer to force Compose to redraw when we mutate the bitmap
-    var cacheVersion by remember { mutableIntStateOf(0) }
-    var activeChunks by remember { mutableStateOf(mutableMapOf<String, CanvasChunk>()) }
-    val CHUNK_SIZE = 512
+
 
     //Viewport states
     var viewportPan by remember { mutableStateOf(Offset.Zero) }
@@ -511,6 +579,77 @@ fun DrawingCanvas(
     
     // Track the pending bounds from ViewModel
     var pendingBoundsInfo by remember { mutableStateOf<NoteViewModel.StrokeBoundsInfo?>(null) }
+
+    // Canvas size (tracked via onSizeChanged for viewport-center image placement)
+    var canvasSize by remember { mutableStateOf(androidx.compose.ui.unit.IntSize.Zero) }
+
+    // Long-press delete state for images
+    var imageToDelete by remember { mutableStateOf<ImageElement?>(null) }
+
+    // Resize state (only for ImageElement selections)
+    var resizingHandle by remember { mutableStateOf<ResizeHandle?>(null) }
+    var resizeBitmap by remember { mutableStateOf<Bitmap?>(null) }
+    var resizePreviewRect by remember { mutableStateOf<Rect?>(null) }
+    // Original elements captured at start of resize (for undo)
+    var resizeOriginalElements by remember { mutableStateOf(emptyList<CanvasElement>()) }
+
+    val context = LocalContext.current
+
+    // Screen-to-canvas and canvas-to-screen helpers
+    val toScreen: (Offset) -> Offset = { canvasPos ->
+        Offset(canvasPos.x * viewportScale + viewportPan.x, canvasPos.y * viewportScale + viewportPan.y)
+    }
+
+    // Image picker launcher — processes the picked URI on a background thread
+    val imageLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.PickVisualMedia()
+    ) { uri ->
+        uri ?: return@rememberLauncherForActivityResult
+        coroutineScope.launch(Dispatchers.IO) {
+            val uuid = UUID.randomUUID().toString()
+            val mimeType = context.contentResolver.getType(uri) ?: "image/jpeg"
+            val ext = mimeType.substringAfter("/").substringBefore(";").ifBlank { "jpg" }
+            val imagesDir = File(context.filesDir, "images").also { it.mkdirs() }
+            val destFile = File(imagesDir, "$uuid.$ext")
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                destFile.outputStream().use { output -> input.copyTo(output) }
+            }
+            val bitmap = BitmapFactory.decodeFile(destFile.absolutePath) ?: return@launch
+            val maxDim = 600f
+            val scale = minOf(maxDim / bitmap.width, maxDim / bitmap.height, 1f)
+            val displayWidth = bitmap.width * scale
+            val displayHeight = bitmap.height * scale
+            val picture = createImagePicture(bitmap, displayWidth, displayHeight)
+            // Place at canvas center of current viewport
+            val screenCenterX = canvasSize.width / 2f
+            val screenCenterY = canvasSize.height / 2f
+            val canvasCenterX = (screenCenterX - viewportPan.x) / viewportScale
+            val canvasCenterY = (screenCenterY - viewportPan.y) / viewportScale
+            val element = ImageElement(
+                imagePath = "images/$uuid.$ext",
+                minX = canvasCenterX - displayWidth / 2f,
+                minY = canvasCenterY - displayHeight / 2f,
+                displayWidth = displayWidth,
+                displayHeight = displayHeight,
+                picture = picture
+            )
+            withContext(Dispatchers.Main) {
+                canvasElements = canvasElements + element
+                val chunkKeys = getOverlappingChunkKeys(element.boundingBox, CHUNK_SIZE)
+                rebuildTargetedChunks(canvasElements, chunkKeys)
+                undoStack = undoStack + CanvasAction.AddElements(listOf(element))
+                redoStack = emptyList()
+            }
+        }
+    }
+
+    // Trigger the image picker when parent requests it
+    LaunchedEffect(shouldOpenImagePicker) {
+        if (shouldOpenImagePicker) {
+            imageLauncher.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            onImagePickerConsumed()
+        }
+    }
     
     // React to ViewModel's bounds updates
     LaunchedEffect(lastProcessedBounds) {
@@ -529,38 +668,96 @@ fun DrawingCanvas(
         }
     }
 
-    // Helper function for rebuilding chunks
-    val rebuildTargetedChunks: (List<CanvasElement>, List<String>) -> Unit = { allElements, dirtyChunkKeys ->
-        dirtyChunkKeys.forEach { key ->
-            // Get the chunk (or create it if it doesn't exist yet)
-            val chunk = activeChunks.getOrPut(key) {
-                val parts = key.split(",")
-                CanvasChunk(parts[0].toInt(), parts[1].toInt(), CHUNK_SIZE)
-            }
+    var feedbackMessage by remember { mutableStateOf<String?>(null) }
+    var feedbackTrigger by remember { mutableIntStateOf(0) }
 
-            // Clear this specific chunk
-            chunk.clear()
+    LaunchedEffect(feedbackMessage, feedbackTrigger) {
+        if (feedbackMessage != null) {
+            delay(1500)
+            feedbackMessage = null
+        }
+    }
 
-            // Find ALL elements that overlap this chunk's bounding box and redraw them
-            allElements.forEach { element ->
-                if (element.boundingBox.overlaps(chunk.bounds)) {
-                    // have to shift the canvas negatively by the chunk's starting position so the stroke draws in the right local spot!
-                    chunk.canvas.save()
-                    chunk.canvas.translate(-chunk.bounds.left, -chunk.bounds.top)
+    val performUndo: () -> Unit = {
+        if (undoStack.isNotEmpty()) {
+            val action = undoStack.last()
+            undoStack = undoStack.dropLast(1)
+            redoStack = redoStack + action
 
-                    // Draw based on type
-                    when (element) {
-                        is PenStroke -> {
-                            chunk.canvas.translate(element.minX, element.minY)
-                            chunk.canvas.drawPicture(element.picture)
-                        }
-                        // is ImageElement -> ... (for later)
-                    }
-                    chunk.canvas.restore()
+            val dirtyChunkKeys = mutableSetOf<String>()
+            when (action) {
+                is CanvasAction.AddElements -> {
+                    action.elements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    val actionIds = action.elements.map { it.id }.toSet()
+                    canvasElements = canvasElements.filterNot { it.id in actionIds }
+                    feedbackMessage = "Undo: Stroke"
+                }
+                is CanvasAction.RemoveElements -> {
+                    action.elements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    canvasElements = canvasElements + action.elements
+                    feedbackMessage = "Undo: Erase"
+                }
+                is CanvasAction.MoveElements -> {
+                    val actionIds = action.elements.map { it.id }.toSet()
+                    val unmodified = canvasElements.filterNot { it.id in actionIds }
+                    val translatedBack = action.elements.map { it.translate(-action.dx, -action.dy) }
+                    action.elements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    translatedBack.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    canvasElements = unmodified + translatedBack
+                    feedbackMessage = "Undo: Lasso"
+                }
+                is CanvasAction.ResizeElements -> {
+                    val resizedIds = action.resizedElements.map { it.id }.toSet()
+                    action.resizedElements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    action.originalElements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    canvasElements = canvasElements.filterNot { it.id in resizedIds } + action.originalElements
+                    feedbackMessage = "Undo: Resize"
                 }
             }
+            feedbackTrigger++
+            rebuildTargetedChunks(canvasElements, dirtyChunkKeys.toList())
         }
-        cacheVersion++ // Trigger Compose to re-render the chunks
+    }
+
+    val performRedo: () -> Unit = {
+        if (redoStack.isNotEmpty()) {
+            val action = redoStack.last()
+            redoStack = redoStack.dropLast(1)
+            undoStack = undoStack + action
+
+            val dirtyChunkKeys = mutableSetOf<String>()
+            when (action) {
+                is CanvasAction.AddElements -> {
+                    action.elements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    canvasElements = canvasElements + action.elements
+                    feedbackMessage = "Redo: Stroke"
+                }
+                is CanvasAction.RemoveElements -> {
+                    action.elements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    val actionIds = action.elements.map { it.id }.toSet()
+                    canvasElements = canvasElements.filterNot { it.id in actionIds }
+                    feedbackMessage = "Redo: Erase"
+                }
+                is CanvasAction.MoveElements -> {
+                    val actionIds = action.elements.map { it.id }.toSet()
+                    val unmodified = canvasElements.filterNot { it.id in actionIds }
+                    val translatedBack = action.elements.map { it.translate(-action.dx, -action.dy) }
+                    translatedBack.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    action.elements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    canvasElements = unmodified + action.elements
+                    feedbackMessage = "Redo: Lasso"
+                }
+                is CanvasAction.ResizeElements -> {
+                    val originalIds = action.originalElements.map { it.id }.toSet()
+                    action.originalElements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    action.resizedElements.forEach { dirtyChunkKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                    canvasElements = canvasElements.filterNot { it.id in originalIds } + action.resizedElements
+                    feedbackMessage = "Redo: Resize"
+                }
+            }
+            feedbackTrigger++
+            rebuildTargetedChunks(canvasElements, dirtyChunkKeys.toList())
+        }
     }
     LaunchedEffect(canvasElements) {
         viewModel.updateCurrentElements(canvasElements)
@@ -586,9 +783,11 @@ fun DrawingCanvas(
         }
     }
 
-    Canvas(
-        modifier = Modifier
-            .fillMaxSize()
+    Box(modifier = Modifier.fillMaxSize()) {
+        Canvas(
+            modifier = Modifier
+                .fillMaxSize()
+                .onSizeChanged { canvasSize = it }
             .pointerInput(Unit) {
                 detectTransformGestures { centroid, pan, zoom, rotation ->
                     // save the old scale before mutating it
@@ -604,12 +803,41 @@ fun DrawingCanvas(
             .pointerInput(Unit){
                 detectMultiFingerTap(
                     onTwoFingerTap = {
-
+                        performUndo()
                     },
                     onThreeFingerTap = {
-
+                        performRedo()
                     }
                 )
+            }
+            .pointerInput(Unit) {
+                // Long-press on ImageElement to trigger delete menu (finger touch only)
+                awaitEachGesture {
+                    val down = awaitFirstDown(requireUnconsumed = false)
+                    if (down.type != PointerType.Stylus) {
+                        val canvasPos = screenToWorld(down.position)
+                        val hitImage = canvasElements.firstOrNull {
+                            it is ImageElement && it.boundingBox.contains(canvasPos)
+                        } as? ImageElement
+                        if (hitImage != null) {
+                            val longPressResult = withTimeoutOrNull(500L) {
+                                // Wait for pointer up or significant movement — either cancels long press
+                                var pressed = true
+                                while (pressed) {
+                                    val event = awaitPointerEvent()
+                                    val change = event.changes.firstOrNull() ?: break
+                                    if ((change.position - down.position).getDistance() > 20f) return@withTimeoutOrNull Unit
+                                    pressed = event.changes.any { it.pressed }
+                                }
+                                Unit // pointer released before timeout → not a long press
+                            }
+                            if (longPressResult == null) {
+                                // Timeout elapsed = long press confirmed
+                                imageToDelete = hitImage
+                            }
+                        }
+                    }
+                }
             }
             .pointerInput(Unit){
                 awaitPointerEventScope {
@@ -667,18 +895,46 @@ fun DrawingCanvas(
 
                     //determining what theyre doing if its lasso
                     if (currentTool == ActiveTool.LASSO) {
-                        // Check if they tapped inside an active selection
-                        if (selectedElements.isNotEmpty() && isPointInPolygon(
-                                virtualBrush,
-                                lassoPath
+                        // Check for resize handle hit (image-only selections, in screen space)
+                        val allImages = selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement }
+                        val hitHandle: ResizeHandle? = if (allImages) {
+                            val selBounds = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
+                                Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
+                            }
+                            val htl = toScreen(Offset(selBounds.left, selBounds.top))
+                            val hbr = toScreen(Offset(selBounds.right, selBounds.bottom))
+                            val handleMap = mapOf(
+                                ResizeHandle.TL to htl,
+                                ResizeHandle.T  to Offset((htl.x + hbr.x) / 2f, htl.y),
+                                ResizeHandle.TR to Offset(hbr.x, htl.y),
+                                ResizeHandle.L  to Offset(htl.x, (htl.y + hbr.y) / 2f),
+                                ResizeHandle.R  to Offset(hbr.x, (htl.y + hbr.y) / 2f),
+                                ResizeHandle.BL to Offset(htl.x, hbr.y),
+                                ResizeHandle.B  to Offset((htl.x + hbr.x) / 2f, hbr.y),
+                                ResizeHandle.BR to hbr
                             )
-                        ) {
+                            handleMap.entries.firstOrNull { (_, pos) -> (down.position - pos).getDistance() < 30f }?.key
+                        } else null
+
+                        if (hitHandle != null) {
+                            // Enter resize mode — decode bitmap now so we only do it once
+                            resizingHandle = hitHandle
+                            resizeOriginalElements = selectedElements.toList()
+                            val firstImage = selectedElements.first() as ImageElement
+                            resizeBitmap = BitmapFactory.decodeFile(File(context.filesDir, firstImage.imagePath).absolutePath)
+                            val selBounds = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
+                                Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
+                            }
+                            resizePreviewRect = selBounds
+                        } else if (selectedElements.isNotEmpty() && isPointInPolygon(virtualBrush, lassoPath)) {
+                            // Check if they tapped inside an active selection for dragging
                             isDraggingSelection = true
                             dragLastPosition = virtualBrush
                         }
                     }
                     // clear lasso if they tapped outside regardless of what tool is selected
-                    if (selectedElements.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
+                    // (but not if we just started a resize gesture on a handle)
+                    if (resizingHandle == null && selectedElements.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
 
                         // tapped outside, commit ink back to the chunks
                         if (selectedElements.isNotEmpty()) {
@@ -695,20 +951,19 @@ fun DrawingCanvas(
                                     }
 
                                     chunk.canvas.save()
-                                    chunk.canvas.translate(-chunk.bounds.left, -chunk.bounds.top)
-
-                                    when (element) {
-                                        is PenStroke -> {
-                                            chunk.canvas.translate(element.minX, element.minY)
-                                            chunk.canvas.drawPicture(element.picture)
-                                        }
-                                        // is ImageElement -> ...
-                                    }
+                                    chunk.canvas.translate(-chunk.bounds.left + element.minX, -chunk.bounds.top + element.minY)
+                                    chunk.canvas.drawPicture(element.picture)
                                     chunk.canvas.restore()
                                 }
                             }
                             cacheVersion++ // Trigger UI update
 
+                            if (lassoTotalDx != 0f || lassoTotalDy != 0f) {
+                                undoStack = undoStack + CanvasAction.MoveElements(selectedElements, lassoTotalDx, lassoTotalDy)
+                                redoStack = emptyList()
+                                lassoTotalDx = 0f
+                                lassoTotalDy = 0f
+                            }
                             canvasElements = canvasElements + selectedElements
                             selectedElements = emptyList()
                         }
@@ -783,13 +1038,15 @@ fun DrawingCanvas(
                                         is PenStroke -> element.points.any {
                                             (it.offset - stylusPos).getDistance() < eraserRadius
                                         }
-                                        // dont erase other types
+                                        is ImageElement -> false // images are deleted via long press only
                                     }
                                 }
 
                                 if (toErase.isNotEmpty()) {
                                     // Remove them from the main list immediately
                                     canvasElements = canvasElements.filterNot { it in toErase }
+                                    undoStack = undoStack + CanvasAction.RemoveElements(toErase)
+                                    redoStack = emptyList()
                                     
                                     // Notify ViewModel to remove from important strokes
                                     viewModel.removeImportantStrokes(toErase)
@@ -805,10 +1062,29 @@ fun DrawingCanvas(
                                 }
 
                             } else if (currentTool == ActiveTool.LASSO) {
-                                if (isDraggingSelection) {
+                                if (resizingHandle != null) {
+                                    // Resize mode: compute new rect from handle anchor + dragged point
+                                    val prev = resizePreviewRect ?: selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
+                                        Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
+                                    }
+                                    val minDim = 20f
+                                    resizePreviewRect = when (resizingHandle) {
+                                        ResizeHandle.BR -> Rect(prev.left, prev.top, maxOf(prev.left + minDim, stylusPos.x), maxOf(prev.top + minDim, stylusPos.y))
+                                        ResizeHandle.BL -> Rect(minOf(prev.right - minDim, stylusPos.x), prev.top, prev.right, maxOf(prev.top + minDim, stylusPos.y))
+                                        ResizeHandle.TR -> Rect(prev.left, minOf(prev.bottom - minDim, stylusPos.y), maxOf(prev.left + minDim, stylusPos.x), prev.bottom)
+                                        ResizeHandle.TL -> Rect(minOf(prev.right - minDim, stylusPos.x), minOf(prev.bottom - minDim, stylusPos.y), prev.right, prev.bottom)
+                                        ResizeHandle.R  -> Rect(prev.left, prev.top, maxOf(prev.left + minDim, stylusPos.x), prev.bottom)
+                                        ResizeHandle.L  -> Rect(minOf(prev.right - minDim, stylusPos.x), prev.top, prev.right, prev.bottom)
+                                        ResizeHandle.B  -> Rect(prev.left, prev.top, prev.right, maxOf(prev.top + minDim, stylusPos.y))
+                                        ResizeHandle.T  -> Rect(prev.left, minOf(prev.bottom - minDim, stylusPos.y), prev.right, prev.bottom)
+                                        null -> prev
+                                    }
+                                } else if (isDraggingSelection) {
                                     // Calculate the distance moved since the last frame
                                     val dx = stylusPos.x - dragLastPosition.x
                                     val dy = stylusPos.y - dragLastPosition.y
+                                    lassoTotalDx += dx
+                                    lassoTotalDy += dy
 
                                     // Translate all selected strokes to new location
                                     selectedElements = selectedElements.map { element ->
@@ -829,6 +1105,37 @@ fun DrawingCanvas(
                         }
                     } while (event.changes.any { it.pressed })
 
+                    // Commit resize on pointer release — auto-commits element back to canvas so undo works cleanly
+                    if (resizingHandle != null) {
+                        val finalRect = resizePreviewRect
+                        val bitmap = resizeBitmap
+                        if (finalRect != null && bitmap != null && finalRect.width > 0f && finalRect.height > 0f) {
+                            val resized = resizeOriginalElements.map { el ->
+                                if (el is ImageElement) {
+                                    val newPicture = createImagePicture(bitmap, finalRect.width, finalRect.height)
+                                    el.copy(minX = finalRect.left, minY = finalRect.top, displayWidth = finalRect.width, displayHeight = finalRect.height, picture = newPicture)
+                                } else el
+                            }
+                            // Auto-commit: put resized elements back into canvas and rebuild chunks
+                            val dirtyKeys = mutableSetOf<String>()
+                            resizeOriginalElements.forEach { dirtyKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                            resized.forEach { dirtyKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
+                            canvasElements = canvasElements + resized
+                            selectedElements = emptyList()
+                            lassoPath = emptyList()
+                            isDraggingSelection = false
+                            lassoTotalDx = 0f
+                            lassoTotalDy = 0f
+                            rebuildTargetedChunks(canvasElements, dirtyKeys.toList())
+                            undoStack = undoStack + CanvasAction.ResizeElements(resizeOriginalElements, resized)
+                            redoStack = emptyList()
+                        }
+                        resizingHandle = null
+                        resizeBitmap = null
+                        resizePreviewRect = null
+                        resizeOriginalElements = emptyList()
+                    }
+
                     // FOR LASSO, CHECK IF THE USER CAPTURED ANYTHING
                     if (currentTool == ActiveTool.LASSO && lassoPath.isNotEmpty()) {
                         val newlySelected = mutableListOf<CanvasElement>()
@@ -837,7 +1144,13 @@ fun DrawingCanvas(
                         for (element in canvasElements) {
                             val isSelected = when (element) {
                                 is PenStroke -> element.points.any { isPointInPolygon(it.offset, lassoPath) }
-                                else -> false
+                                is ImageElement -> listOf(
+                                    Offset(element.minX, element.minY),
+                                    Offset(element.maxX, element.minY),
+                                    Offset(element.maxX, element.maxY),
+                                    Offset(element.minX, element.maxY),
+                                    element.boundingBox.center
+                                ).any { isPointInPolygon(it, lassoPath) }
                             }
 
                             if (isSelected) {
@@ -973,6 +1286,8 @@ fun DrawingCanvas(
                         // 3. Update states
                         cacheVersion++
                         canvasElements = canvasElements + newStroke
+                        undoStack = undoStack + CanvasAction.AddElements(listOf(newStroke))
+                        redoStack = emptyList()
                         
                         if (currentTool == ActiveTool.IMPORTANT_PEN) {
                             viewModel.processImportantStroke(newStroke)
@@ -1047,17 +1362,12 @@ fun DrawingCanvas(
                 ) //create temp stroke with empty pic to pass to drawStroke
                 drawStroke(currentStroke, thickness)
             }
-            //selected strokes use more optimized picture movement
+            //selected elements use more optimized picture movement
             drawIntoCanvas { canvas ->
-                selectedElements.forEach { stroke ->
+                selectedElements.forEach { element ->
                     canvas.save()
-
-                    canvas.translate(stroke.minX, stroke.minY)
-
-                    if (stroke is PenStroke) {
-                        canvas.nativeCanvas.drawPicture(stroke.picture)
-                    }
-
+                    canvas.translate(element.minX, element.minY)
+                    canvas.nativeCanvas.drawPicture(element.picture)
                     canvas.restore()
                 }
             }
@@ -1110,6 +1420,53 @@ fun DrawingCanvas(
             }
         }
         // non transformed things
+
+        // Resize handles for image-only selections (drawn in screen space for constant visual size)
+        if (selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement }) {
+            val selBounds = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
+                Rect(
+                    minOf(acc.left, el.minX), minOf(acc.top, el.minY),
+                    maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY)
+                )
+            }
+            val tl = toScreen(Offset(selBounds.left, selBounds.top))
+            val br = toScreen(Offset(selBounds.right, selBounds.bottom))
+            val tm = Offset((tl.x + br.x) / 2f, tl.y)
+            val bm = Offset((tl.x + br.x) / 2f, br.y)
+            val ml = Offset(tl.x, (tl.y + br.y) / 2f)
+            val mr = Offset(br.x, (tl.y + br.y) / 2f)
+            val tr = Offset(br.x, tl.y)
+            val bl = Offset(tl.x, br.y)
+
+            // Selection outline
+            drawRect(
+                color = Color.Blue,
+                topLeft = tl,
+                size = Size(br.x - tl.x, br.y - tl.y),
+                style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f))
+            )
+
+            // Draw resize preview outline during active resize
+            resizePreviewRect?.let { rect ->
+                val rtl = toScreen(Offset(rect.left, rect.top))
+                val rbr = toScreen(Offset(rect.right, rect.bottom))
+                drawRect(
+                    color = Color.Blue,
+                    topLeft = rtl,
+                    size = Size(rbr.x - rtl.x, rbr.y - rtl.y),
+                    style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f))
+                )
+            }
+
+            // 8 handle squares
+            val handleSize = 12f
+            val halfHandle = handleSize / 2f
+            listOf(tl, tm, tr, ml, mr, bl, bm, br).forEach { pos ->
+                drawRect(color = Color.White, topLeft = pos - Offset(halfHandle, halfHandle), size = Size(handleSize, handleSize))
+                drawRect(color = Color.Blue, topLeft = pos - Offset(halfHandle, halfHandle), size = Size(handleSize, handleSize), style = Stroke(1.5f))
+            }
+        }
+
         // move the cursor
         cursorPosition?.let { pos ->
             if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
@@ -1135,6 +1492,51 @@ fun DrawingCanvas(
             }
         }
     }
+        
+    AnimatedVisibility(
+        visible = feedbackMessage != null,
+        enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
+        exit = fadeOut() + slideOutVertically(targetOffsetY = { it / 2 }),
+        modifier = Modifier
+            .align(Alignment.BottomCenter)
+            .padding(bottom = 64.dp)
+    ) {
+        Surface(
+            shape = RoundedCornerShape(50),
+            color = Color.Black.copy(alpha = 0.7f),
+            shadowElevation = 4.dp
+        ) {
+            Text(
+                text = feedbackMessage ?: "",
+                color = Color.White,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)
+            )
+        }
+    }
+
+    // Delete image dialog (triggered by long press)
+    imageToDelete?.let { image ->
+        AlertDialog(
+            onDismissRequest = { imageToDelete = null },
+            title = { Text("Delete Image") },
+            text = { Text("Remove this image from the canvas?") },
+            confirmButton = {
+                TextButton(onClick = {
+                    val dirtyKeys = getOverlappingChunkKeys(image.boundingBox, CHUNK_SIZE)
+                    canvasElements = canvasElements.filterNot { it.id == image.id }
+                    undoStack = undoStack + CanvasAction.RemoveElements(listOf(image))
+                    redoStack = emptyList()
+                    rebuildTargetedChunks(canvasElements, dirtyKeys)
+                    imageToDelete = null
+                }) { Text("Delete") }
+            },
+            dismissButton = {
+                TextButton(onClick = { imageToDelete = null }) { Text("Cancel") }
+            }
+        )
+    }
+}
 }
 
 @Composable

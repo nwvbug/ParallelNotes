@@ -1,6 +1,8 @@
 package com.nvemuri.parallelnotes.utils
 
+import android.graphics.Bitmap
 import android.graphics.Picture
+import android.graphics.RectF
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.graphics.Color
@@ -184,4 +186,13 @@ fun getOverlappingChunkKeys(bounds: Rect, CHUNK_SIZE: Int): List<String> {
         }
     }
     return keys
+}
+
+// Image Picture Utility
+fun createImagePicture(bitmap: Bitmap, width: Float, height: Float): Picture {
+    val picture = Picture()
+    val canvas = picture.beginRecording(width.toInt().coerceAtLeast(1), height.toInt().coerceAtLeast(1))
+    canvas.drawBitmap(bitmap, null, RectF(0f, 0f, width, height), null)
+    picture.endRecording()
+    return picture
 }

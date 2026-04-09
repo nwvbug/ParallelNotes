@@ -1,5 +1,6 @@
 package com.nvemuri.parallelnotes.data
 
+import android.graphics.BitmapFactory
 import android.graphics.Picture
 import android.graphics.Canvas as NativeCanvas
 import android.graphics.Paint as NativePaint
@@ -20,14 +21,17 @@ import androidx.room.TypeConverters
 import androidx.room.migration.Migration
 import androidx.sqlite.db.SupportSQLiteDatabase
 import com.nvemuri.parallelnotes.data.entities.CanvasElement
+import com.nvemuri.parallelnotes.data.entities.ImageElement
 import com.nvemuri.parallelnotes.data.entities.PenStroke
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
 import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
 import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
 import com.nvemuri.parallelnotes.utils.bezierSmoothStroke
+import com.nvemuri.parallelnotes.utils.createImagePicture
 import kotlinx.serialization.json.Json
 import android.content.Context
+import java.io.File
 import kotlinx.coroutines.flow.Flow
 import kotlinx.serialization.encodeToString
 import kotlinx.serialization.decodeFromString
@@ -134,7 +138,7 @@ class CanvasDataConverter {
     }
 }
 
-fun SerializableElement.toCanvasElement(): CanvasElement {
+fun SerializableElement.toCanvasElement(context: Context): CanvasElement {
     return when (type) {
         "PEN" -> {
             val composeColor = Color(colorArgb)
@@ -186,6 +190,22 @@ fun SerializableElement.toCanvasElement(): CanvasElement {
                 color = composeColor,
                 picture = picture,
                 minX = minX, maxX = maxX, minY = minY, maxY = maxY
+            )
+        }
+        "IMAGE" -> {
+            val path = requireNotNull(imagePath) { "ImageElement missing imagePath" }
+            val file = File(context.filesDir, path)
+            val bitmap = BitmapFactory.decodeFile(file.absolutePath)
+            val w = (maxX - minX).coerceAtLeast(1f)
+            val h = (maxY - minY).coerceAtLeast(1f)
+            val picture = if (bitmap != null) createImagePicture(bitmap, w, h) else Picture()
+            ImageElement(
+                id = id,
+                zIndex = zIndex,
+                imagePath = path,
+                minX = minX, minY = minY,
+                displayWidth = w, displayHeight = h,
+                picture = picture
             )
         }
         else -> throw IllegalArgumentException("Unknown type: $type")

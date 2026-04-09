@@ -189,7 +189,7 @@ class NoteViewModel(
                         val rebuiltElements: List<CanvasElement> = withContext(Dispatchers.Default) {
                             val jsonString = file.readText()
                             val serializableData = Json.decodeFromString<List<SerializableElement>>(jsonString)
-                            serializableData.map { it.toCanvasElement() }
+                            serializableData.map { it.toCanvasElement(context) }
                         }
                         _currentElements.value = rebuiltElements
                     }

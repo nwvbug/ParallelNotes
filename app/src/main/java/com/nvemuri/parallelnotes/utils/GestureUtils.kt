@@ -24,7 +24,8 @@ suspend fun PointerInputScope.detectMultiFingerTap(
             event.changes.forEach { change ->
                 val movement = change.position - change.previousPosition
                 val distance = movement.getDistance()
-                if (distance > 15f){
+                // Increase drag threshold so small finger movements during taps aren't counted as drags
+                if (distance > 40f){
                     isDrag = true
                 }
             }
@@ -33,7 +34,8 @@ suspend fun PointerInputScope.detectMultiFingerTap(
         val endTime = System.currentTimeMillis()
         val duration = endTime - startTime
 
-        if (!isDrag && duration < 400){
+        // Increase maximum duration for a multi-finger tap to be recognized
+        if (!isDrag && duration < 600){
             if (pointerCount == 2){
                 onTwoFingerTap()
             } else if (pointerCount == 3){

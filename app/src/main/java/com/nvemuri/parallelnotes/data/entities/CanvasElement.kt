@@ -18,6 +18,9 @@ sealed interface CanvasElement {
     val maxX: Float
     val maxY: Float
 
+    // Pre-recorded picture for chunk rendering (drawn relative to minX, minY)
+    val picture: Picture
+
     // A convenience property that will make your Lasso and Tiling math much easier later
     val boundingBox: Rect
         get() = Rect(minX, minY, maxX, maxY)
@@ -38,7 +41,7 @@ data class PenStroke(
     val arcSmoothing: Boolean,  // Whether this stroke was smoothed
     val thickness: Float,
     val color: Color,
-    val picture: Picture,
+    override val picture: Picture,
     override val minX: Float,
     override val maxX: Float,
     override val minY: Float,
@@ -61,6 +64,22 @@ data class PenStroke(
 }
 
 
+data class ImageElement(
+    override val id: String = UUID.randomUUID().toString(),
+    override val zIndex: Float = 0.5f,
+    val imagePath: String,       // relative path under filesDir, e.g. "images/{uuid}.jpg"
+    override val minX: Float,
+    override val minY: Float,
+    val displayWidth: Float,
+    val displayHeight: Float,
+    override val picture: Picture,
+) : CanvasElement {
+    override val maxX: Float get() = minX + displayWidth
+    override val maxY: Float get() = minY + displayHeight
+
+    override fun translate(dx: Float, dy: Float) = copy(minX = minX + dx, minY = minY + dy)
+}
+
 @Serializable
 data class SerializablePoint(
     val x: Float,
@@ -79,6 +98,8 @@ data class SerializableElement(
     val arcSmoothing: Boolean = false,
     val thickness: Float = 0f,
     val colorArgb: Int = 0,
+    // Image-specific
+    val imagePath: String? = null,
     // Bounding box
     val minX: Float, val maxX: Float, val minY: Float, val maxY: Float
 )
@@ -95,6 +116,13 @@ fun CanvasElement.toSerializable(): SerializableElement {
             arcSmoothing = this.arcSmoothing,
             thickness = this.thickness,
             colorArgb = this.color.toArgb(),
+            minX = this.minX, maxX = this.maxX, minY = this.minY, maxY = this.maxY
+        )
+        is ImageElement -> SerializableElement(
+            id = this.id,
+            zIndex = this.zIndex,
+            type = "IMAGE",
+            imagePath = this.imagePath,
             minX = this.minX, maxX = this.maxX, minY = this.minY, maxY = this.maxY
         )
         else -> throw IllegalArgumentException("Unknown element type")

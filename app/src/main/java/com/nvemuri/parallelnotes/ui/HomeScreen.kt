@@ -37,6 +37,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalContext
 import com.nvemuri.parallelnotes.R
 import com.nvemuri.parallelnotes.data.NoteEntity
 import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
@@ -176,7 +177,7 @@ fun HomeScreen(
                 // Important Strokes Pane - Horizontal Category Panels
                 if (importantStrokes.isNotEmpty()) {
                     Text(
-                        "Important Summaries",
+                        "Spotlight Summaries",
                         fontWeight = FontWeight.Bold, 
                         modifier = Modifier.padding(8.dp)
                     )
@@ -326,7 +327,7 @@ fun HomeScreen(
     if (strokeToDelete != null) {
         AlertDialog(
             onDismissRequest = { strokeToDelete = null },
-            title = { Text("Delete Important Writing?") },
+            title = { Text("Delete Spotlight?") },
             text = { Text("This will remove the writing from the summary pane, but NOT from the original note.") },
             confirmButton = {
                 TextButton(
@@ -373,9 +374,10 @@ fun ImportantStrokeCard(
             horizontalArrangement = Arrangement.SpaceBetween
         ) {
             // Render the strokes in a small canvas
+            val context = LocalContext.current
             Box(modifier = Modifier.size(100.dp, 40.dp)) {
                 Canvas(modifier = Modifier.fillMaxSize()) {
-                    val elements = stroke.serializedElements.map { it.toCanvasElement() }
+                    val elements = stroke.serializedElements.map { it.toCanvasElement(context) }
                     val padding = 10f
                     val scaleX = (size.width - padding * 2) / (stroke.maxX - stroke.minX).coerceAtLeast(1f)
                     val scaleY = (size.height - padding * 2) / (stroke.maxY - stroke.minY).coerceAtLeast(1f)
