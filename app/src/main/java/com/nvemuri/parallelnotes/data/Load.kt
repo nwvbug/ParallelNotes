@@ -23,6 +23,7 @@ import androidx.sqlite.db.SupportSQLiteDatabase
 import com.nvemuri.parallelnotes.data.entities.CanvasElement
 import com.nvemuri.parallelnotes.data.entities.ImageElement
 import com.nvemuri.parallelnotes.data.entities.PenStroke
+import com.nvemuri.parallelnotes.data.entities.PenStyle
 import com.nvemuri.parallelnotes.data.entities.Point
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
 import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
@@ -155,27 +156,66 @@ fun SerializableElement.toCanvasElement(context: Context): CanvasElement {
             val height = (maxY - minY).toInt() + 1
             val nativeCanvas: NativeCanvas = picture.beginRecording(width, height)
 
+            val strokePenStyle = runCatching { PenStyle.valueOf(penStyle) }.getOrDefault(PenStyle.SOLID)
+
             val nativePaint = NativePaint().apply {
                 color = colorArgb
                 isAntiAlias = true
-                strokeCap = NativePaint.Cap.ROUND
+                style = NativePaint.Style.STROKE
                 strokeJoin = NativePaint.Join.ROUND
             }
 
-            if (smoothedPoints.size == 1) {
-                val p = smoothedPoints.first()
-                nativePaint.strokeWidth = (0.2f + (p.pressure * 0.8f)) * thickness
-                nativeCanvas.drawPoint(p.offset.x - minX, p.offset.y - minY, nativePaint)
-            } else {
-                for (i in 0 until smoothedPoints.size - 1) {
-                    val start = smoothedPoints[i]
-                    val end = smoothedPoints[i + 1]
-                    nativePaint.strokeWidth = (0.2f + (end.pressure * 0.8f)) * thickness
-                    nativeCanvas.drawLine(
-                        start.offset.x - minX, start.offset.y - minY,
-                        end.offset.x - minX, end.offset.y - minY,
-                        nativePaint
+            when (strokePenStyle) {
+                PenStyle.SOLID -> {
+                    nativePaint.strokeCap = NativePaint.Cap.ROUND
+                    if (smoothedPoints.size == 1) {
+                        val p = smoothedPoints.first()
+                        nativePaint.strokeWidth = (0.2f + (p.pressure * 0.8f)) * thickness
+                        nativeCanvas.drawPoint(p.offset.x - minX, p.offset.y - minY, nativePaint)
+                    } else {
+                        for (i in 0 until smoothedPoints.size - 1) {
+                            val start = smoothedPoints[i]
+                            val end = smoothedPoints[i + 1]
+                            nativePaint.strokeWidth = (0.2f + (end.pressure * 0.8f)) * thickness
+                            nativeCanvas.drawLine(
+                                start.offset.x - minX, start.offset.y - minY,
+                                end.offset.x - minX, end.offset.y - minY,
+                                nativePaint
+                            )
+                        }
+                    }
+                }
+                PenStyle.DASHED -> {
+                    val avgPressure = smoothedPoints.map { 0.2f + it.pressure * 0.8f }.average().toFloat()
+                    nativePaint.strokeWidth = avgPressure * thickness
+                    nativePaint.strokeCap = NativePaint.Cap.ROUND
+                    nativePaint.pathEffect = android.graphics.DashPathEffect(
+                        floatArrayOf(thickness * 1.5f, thickness * 1f), 0f
                     )
+                    val path = android.graphics.Path().apply {
+                        moveTo(smoothedPoints.first().offset.x - minX, smoothedPoints.first().offset.y - minY)
+                        for (i in 1 until smoothedPoints.size) {
+                            lineTo(smoothedPoints[i].offset.x - minX, smoothedPoints[i].offset.y - minY)
+                        }
+                    }
+                    nativeCanvas.drawPath(path, nativePaint)
+                }
+                PenStyle.HIGHLIGHTER -> {
+                    nativePaint.alpha = 100
+                    nativePaint.strokeWidth = thickness * 1.5f
+                    nativePaint.strokeCap = NativePaint.Cap.SQUARE
+                    if (smoothedPoints.size == 1) {
+                        val p = smoothedPoints.first()
+                        nativeCanvas.drawPoint(p.offset.x - minX, p.offset.y - minY, nativePaint)
+                    } else {
+                        val path = android.graphics.Path().apply {
+                            moveTo(smoothedPoints.first().offset.x - minX, smoothedPoints.first().offset.y - minY)
+                            for (i in 1 until smoothedPoints.size) {
+                                lineTo(smoothedPoints[i].offset.x - minX, smoothedPoints[i].offset.y - minY)
+                            }
+                        }
+                        nativeCanvas.drawPath(path, nativePaint)
+                    }
                 }
             }
             picture.endRecording()
@@ -188,6 +228,7 @@ fun SerializableElement.toCanvasElement(context: Context): CanvasElement {
                 arcSmoothing = arcSmoothing,
                 thickness = thickness,
                 color = composeColor,
+                penStyle = strokePenStyle,
                 picture = picture,
                 minX = minX, maxX = maxX, minY = minY, maxY = maxY
             )

@@ -29,6 +29,7 @@ import com.nvemuri.parallelnotes.data.ImportantStrokeDao
 import com.nvemuri.parallelnotes.data.ImportantCategoryDao
 import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
 import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
+import com.nvemuri.parallelnotes.data.entities.ImageElement
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.io.File
@@ -39,6 +40,7 @@ import kotlinx.coroutines.flow.flatMapLatest
 import kotlin.math.abs
 import kotlin.math.max
 import kotlin.math.min
+import kotlin.math.round
 import kotlin.math.sqrt
 
 class NoteViewModel(
@@ -438,62 +440,107 @@ class NoteViewModel(
                     if (element.maxY > maxY) maxY = element.maxY
                 }
 
-                val padding = 50f
-                val width = (maxX - minX + padding * 2).toInt().coerceAtLeast(100)
-                val height = (maxY - minY + padding * 2).toInt().coerceAtLeast(100)
+                // US Letter width in PDF points (72 DPI = 8.5" wide), custom height
+                val pageWidth = 612f
+                val pagePadding = 36f // 0.5-inch margins
+
+                val contentWidth = (maxX - minX).coerceAtLeast(1f)
+                val contentHeight = (maxY - minY).coerceAtLeast(1f)
+
+                // Scale so content fills the letter width; height follows proportionally
+                val scale = (pageWidth - pagePadding * 2) / contentWidth
+                val pageHeight = (contentHeight * scale + pagePadding * 2).toInt().coerceAtLeast(100)
 
                 val pdfDocument = PdfDocument()
-                val pageInfo = PdfDocument.PageInfo.Builder(width, height, 1).create()
+                val pageInfo = PdfDocument.PageInfo.Builder(pageWidth.toInt(), pageHeight, 1).create()
                 val page = pdfDocument.startPage(pageInfo)
                 val canvas = page.canvas
 
-                // 2. Global translation instead of per-stroke translation
-                canvas.translate(-minX + padding, -minY + padding)
+                // 2. Translate to margin, scale to page units, then shift content origin to (0,0)
+                canvas.translate(pagePadding, pagePadding)
+                canvas.scale(scale, scale)
+                canvas.translate(-minX, -minY)
 
                 val paint = android.graphics.Paint().apply {
                     isAntiAlias = true
                     strokeCap = android.graphics.Paint.Cap.ROUND
                     strokeJoin = android.graphics.Paint.Join.ROUND
+                    style = android.graphics.Paint.Style.STROKE
                 }
 
-                // 3. Decimation thresholds: only draw significant changes
-                val distThresholdSq = 1.0f * 1.0f // 1pt distance (at 72dpi, this is enough)
-                val pressureThreshold = 0.05f     // 5% pressure change
+                // 3. Decimation threshold: skip points closer than 2px (imperceptible at PDF scale)
+                val distThresholdSq = 2.0f * 2.0f
+                // Pressure quantization: 8 discrete levels reduces path-flush frequency
+                // while preserving visible variation (each level = 12.5% change)
+                val pressureLevels = 8
 
-                elements.forEach { element ->
-                    if (element is PenStroke) {
-                        paint.color = element.color.toArgb()
-                        val pts = element.points
-                        if (pts.isEmpty()) return@forEach
-                        
-                        var lastDrawnPt = pts[0]
-                        var lastDrawnPressure = lastDrawnPt.pressure
-                        
-                        if (pts.size == 1) {
-                            paint.strokeWidth = (0.2f + (lastDrawnPressure * 0.8f)) * element.thickness
-                            canvas.drawPoint(lastDrawnPt.offset.x, lastDrawnPt.offset.y, paint)
-                        } else {
-                            for (i in 1 until pts.size) {
-                                val currPt = pts[i]
-                                val dx = currPt.offset.x - lastDrawnPt.offset.x
-                                val dy = currPt.offset.y - lastDrawnPt.offset.y
-                                val distSq = dx * dx + dy * dy
-                                val pressureDiff = abs(currPt.pressure - lastDrawnPressure)
+                // Draw in z-order so images and strokes layer correctly
+                elements.sortedBy { it.zIndex }.forEach { element ->
+                    when (element) {
+                        is PenStroke -> {
+                            paint.color = element.color.toArgb()
+                            val pts = element.points
+                            if (pts.isEmpty()) return@forEach
 
-                                // Only commit a vector line if the point has moved enough 
-                                // or pressure has changed significantly
-                                if (distSq >= distThresholdSq || pressureDiff >= pressureThreshold || i == pts.size - 1) {
-                                    paint.strokeWidth = (0.2f + (currPt.pressure * 0.8f)) * element.thickness
-                                    canvas.drawLine(
-                                        lastDrawnPt.offset.x, lastDrawnPt.offset.y,
-                                        currPt.offset.x, currPt.offset.y,
-                                        paint
-                                    )
-                                    lastDrawnPt = currPt
-                                    lastDrawnPressure = currPt.pressure
+                            if (pts.size == 1) {
+                                val pt = pts[0]
+                                val qp = (round(pt.pressure * pressureLevels).toFloat() / pressureLevels).coerceIn(0f, 1f)
+                                paint.strokeWidth = (0.2f + qp * 0.8f) * element.thickness
+                                canvas.drawPoint(pt.offset.x, pt.offset.y, paint)
+                            } else {
+                                // Batch consecutive segments with the same quantized stroke width
+                                // into a single Path, cutting PDF path-operation count from
+                                // O(points) down to O(strokes × pressureLevels).
+                                var currentWidth = -1f
+                                var path = android.graphics.Path()
+                                var pathHasContent = false
+                                var lastPt = pts[0]
+
+                                fun flushPath() {
+                                    if (pathHasContent) {
+                                        canvas.drawPath(path, paint)
+                                        path = android.graphics.Path()
+                                        pathHasContent = false
+                                    }
+                                }
+
+                                for (i in 1 until pts.size) {
+                                    val currPt = pts[i]
+                                    val dx = currPt.offset.x - lastPt.offset.x
+                                    val dy = currPt.offset.y - lastPt.offset.y
+                                    if (dx * dx + dy * dy < distThresholdSq && i != pts.size - 1) continue
+
+                                    val qp = (round(currPt.pressure * pressureLevels).toFloat() / pressureLevels).coerceIn(0f, 1f)
+                                    val newWidth = (0.2f + qp * 0.8f) * element.thickness
+
+                                    if (newWidth != currentWidth) {
+                                        flushPath()
+                                        currentWidth = newWidth
+                                        paint.strokeWidth = currentWidth
+                                        // Start new path from the last drawn point so there's no gap
+                                        path.moveTo(lastPt.offset.x, lastPt.offset.y)
+                                        pathHasContent = false
+                                    }
+
+                                    path.lineTo(currPt.offset.x, currPt.offset.y)
+                                    pathHasContent = true
+                                    lastPt = currPt
+                                }
+                                flushPath()
+                            }
+                        }
+                        is ImageElement -> {
+                            val file = File(context.filesDir, element.imagePath)
+                            if (file.exists()) {
+                                val bitmap = android.graphics.BitmapFactory.decodeFile(file.absolutePath)
+                                if (bitmap != null) {
+                                    val dst = android.graphics.RectF(element.minX, element.minY, element.maxX, element.maxY)
+                                    canvas.drawBitmap(bitmap, null, dst, null)
+                                    bitmap.recycle()
                                 }
                             }
                         }
+                        else -> { /* unknown element type */ }
                     }
                 }
 

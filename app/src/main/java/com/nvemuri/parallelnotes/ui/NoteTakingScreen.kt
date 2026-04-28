@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.layout.ContentScale
 
+import androidx.activity.compose.BackHandler
 import com.nvemuri.parallelnotes.R
 import com.nvemuri.parallelnotes.data.entities.ImageElement
 import com.nvemuri.parallelnotes.data.entities.PenStroke
@@ -56,6 +57,7 @@ import com.nvemuri.parallelnotes.utils.drawStroke
 import com.nvemuri.parallelnotes.utils.isPointInPolygon
 import com.nvemuri.parallelnotes.data.entities.CanvasAction
 import com.nvemuri.parallelnotes.data.entities.CanvasElement
+import com.nvemuri.parallelnotes.data.entities.PenStyle
 import com.nvemuri.parallelnotes.utils.getOverlappingChunkKeys
 import com.nvemuri.parallelnotes.data.CanvasChunk
 import com.nvemuri.parallelnotes.utils.detectMultiFingerTap
@@ -93,6 +95,7 @@ import android.content.Intent
 import androidx.compose.foundation.verticalScroll
 import androidx.core.content.FileProvider
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
 import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
 import com.nvemuri.parallelnotes.data.entities.toSerializable
 
@@ -123,6 +126,8 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
+    BackHandler { onNavigateHome() }
+
     var currentTool by remember { mutableStateOf(ActiveTool.DRAW)}
 
     //pen settings
@@ -130,7 +135,21 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     var currentPenStyle by remember { mutableStateOf(PenStyle.SOLID) }
     // Increased default thickness since we're starting zoomed out
     var penThickness by remember { mutableFloatStateOf(35f) }
-    var penColor by remember { mutableStateOf(Color.Black) }
+    var solidColor by remember { mutableStateOf(Color.Black) }
+    var dashedColor by remember { mutableStateOf(Color.Black) }
+    var highlighterColor by remember { mutableStateOf(Color.Yellow) }
+    val penColor = when (currentPenStyle) {
+        PenStyle.SOLID -> solidColor
+        PenStyle.DASHED -> dashedColor
+        PenStyle.HIGHLIGHTER -> highlighterColor
+    }
+    val onPenColorSelected: (Color) -> Unit = { color ->
+        when (currentPenStyle) {
+            PenStyle.SOLID -> solidColor = color
+            PenStyle.DASHED -> dashedColor = color
+            PenStyle.HIGHLIGHTER -> highlighterColor = color
+        }
+    }
     var isColorSelectorOpen by remember { mutableStateOf(false)}
     var arcSmoothingEnabled by remember { mutableStateOf(true) }
     var removeJitterAmount by remember { mutableFloatStateOf(25f) }
@@ -153,7 +172,7 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
 
     Box(modifier = Modifier.fillMaxSize()){
         DrawingCanvas(
-            currentTool, penThickness, penColor, arcSmoothingEnabled, smoothCurrentStroke,
+            currentTool, penThickness, penColor, currentPenStyle, arcSmoothingEnabled, smoothCurrentStroke,
             removeJitterAmount, viewModel,
             shouldOpenImagePicker = shouldOpenImagePicker,
             onImagePickerConsumed = { shouldOpenImagePicker = false }
@@ -168,7 +187,7 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
             if (showColorToolbar) {
                 ColorToolbar(
                     currentColor = penColor,
-                    onColorSelected = { penColor = it },
+                    onColorSelected = onPenColorSelected,
                     modifier = Modifier
 //                        .align(Alignment.TopStart)
                         .padding(start = 16.dp, top = 16.dp)
@@ -450,9 +469,7 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
         if (isColorSelectorOpen) {
             PresetColorPickerDialog(
                 onDismiss = { isColorSelectorOpen = false },
-                onColorSelected = { selectedColor ->
-                    penColor = selectedColor
-                }
+                onColorSelected = onPenColorSelected
             )
         }
         Surface(
@@ -489,12 +506,6 @@ enum class ActiveTool {
     LASSO
 }
 
-enum class PenStyle {
-    SOLID,
-    DASHED,
-    HIGHLIGHTER
-}
-
 enum class ResizeHandle { TL, T, TR, L, R, BL, B, BR }
 
 
@@ -504,6 +515,7 @@ fun DrawingCanvas(
     currentTool: ActiveTool,
     thickness: Float,
     pencolor: Color,
+    penStyle: PenStyle,
     arcSmoothing: Boolean,
     smoothCurrentStroke: Boolean,
     removeJitterAmount: Float,
@@ -859,7 +871,7 @@ fun DrawingCanvas(
                     }
                 }
             }
-            .pointerInput(currentTool, removeJitterAmount, smoothCurrentStroke, arcSmoothing, pencolor, thickness, selectedImportantCategory){
+            .pointerInput(currentTool, removeJitterAmount, smoothCurrentStroke, arcSmoothing, pencolor, thickness, penStyle, selectedImportantCategory){
                 awaitEachGesture {
                     // POINTER DOWN
                     val down = awaitFirstDown()
@@ -1198,9 +1210,9 @@ fun DrawingCanvas(
                             if (y > maxY) maxY = y
                         }
 
-                        // Pad the bounding box by the radius of the thickest possible point
-                        // user specified thickness * mapped pressure max /2f
-                        val padding = thickness * (0.2f + (1 * 0.8f)) / 2f
+                        val strokePenStyle = if (currentTool == ActiveTool.IMPORTANT_PEN) PenStyle.SOLID else penStyle
+                        val maxWidth = if (strokePenStyle == PenStyle.HIGHLIGHTER) thickness * 1.5f else thickness
+                        val padding = maxWidth / 2f
 
                         minX -= padding
                         minY -= padding
@@ -1215,11 +1227,11 @@ fun DrawingCanvas(
                         val actualColor = if (currentTool == ActiveTool.IMPORTANT_PEN) {
                             if (selectedImportantCategory != null) Color(selectedImportantCategory!!.colorArgb) else Color(0xFFFFD700)
                         } else pencolor
-                        
+
                         val nativePaint = NativePaint().apply {
-                            color = actualColor.toArgb() 
+                            color = actualColor.toArgb()
                             isAntiAlias = true
-                            strokeCap = Cap.ROUND
+                            style = NativePaint.Style.STROKE
                             strokeJoin = Join.ROUND
                         }
                         val pointsToSave = if (arcSmoothing) {
@@ -1227,25 +1239,58 @@ fun DrawingCanvas(
                         } else {
                             currentRawStroke
                         }
-                        // handle it depending on if its a dot or line
-                        if (pointsToSave.size == 1) { //if it is just a single dot
-                            val singlePoint = pointsToSave.first()
-                            nativePaint.strokeWidth = (0.2f + (singlePoint.pressure * 0.8f)) * thickness
-                            nativeCanvas.drawPoint(
-                                singlePoint.offset.x - minX,
-                                singlePoint.offset.y - minY,
-                                nativePaint
-                            )
-                        } else { //if it is an actual stroke
-                            for (i in 0 until pointsToSave.size - 1) {
-                                val start = pointsToSave[i]
-                                val end = pointsToSave[i + 1]
-                                nativePaint.strokeWidth = (0.2f + (end.pressure * 0.8f)) * thickness
-                                nativeCanvas.drawLine(
-                                    start.offset.x - minX, start.offset.y - minY,
-                                    end.offset.x - minX, end.offset.y - minY,
-                                    nativePaint
+
+                        when (strokePenStyle) {
+                            PenStyle.SOLID -> {
+                                nativePaint.strokeCap = Cap.ROUND
+                                if (pointsToSave.size == 1) {
+                                    val p = pointsToSave.first()
+                                    nativePaint.strokeWidth = (0.2f + (p.pressure * 0.8f)) * thickness
+                                    nativeCanvas.drawPoint(p.offset.x - minX, p.offset.y - minY, nativePaint)
+                                } else {
+                                    for (i in 0 until pointsToSave.size - 1) {
+                                        val start = pointsToSave[i]
+                                        val end = pointsToSave[i + 1]
+                                        nativePaint.strokeWidth = (0.2f + (end.pressure * 0.8f)) * thickness
+                                        nativeCanvas.drawLine(
+                                            start.offset.x - minX, start.offset.y - minY,
+                                            end.offset.x - minX, end.offset.y - minY,
+                                            nativePaint
+                                        )
+                                    }
+                                }
+                            }
+                            PenStyle.DASHED -> {
+                                val avgPressure = pointsToSave.map { 0.2f + it.pressure * 0.8f }.average().toFloat()
+                                nativePaint.strokeWidth = avgPressure * thickness
+                                nativePaint.strokeCap = Cap.ROUND
+                                nativePaint.pathEffect = android.graphics.DashPathEffect(
+                                    floatArrayOf(thickness * 1.5f, thickness * 1f), 0f
                                 )
+                                val path = android.graphics.Path().apply {
+                                    moveTo(pointsToSave.first().offset.x - minX, pointsToSave.first().offset.y - minY)
+                                    for (i in 1 until pointsToSave.size) {
+                                        lineTo(pointsToSave[i].offset.x - minX, pointsToSave[i].offset.y - minY)
+                                    }
+                                }
+                                nativeCanvas.drawPath(path, nativePaint)
+                            }
+                            PenStyle.HIGHLIGHTER -> {
+                                nativePaint.alpha = 100
+                                nativePaint.strokeWidth = thickness * 1.5f
+                                nativePaint.strokeCap = Cap.SQUARE
+                                if (pointsToSave.size == 1) {
+                                    val p = pointsToSave.first()
+                                    nativeCanvas.drawPoint(p.offset.x - minX, p.offset.y - minY, nativePaint)
+                                } else {
+                                    val path = android.graphics.Path().apply {
+                                        moveTo(pointsToSave.first().offset.x - minX, pointsToSave.first().offset.y - minY)
+                                        for (i in 1 until pointsToSave.size) {
+                                            lineTo(pointsToSave[i].offset.x - minX, pointsToSave[i].offset.y - minY)
+                                        }
+                                    }
+                                    nativeCanvas.drawPath(path, nativePaint)
+                                }
                             }
                         }
                         picture.endRecording()
@@ -1260,6 +1305,7 @@ fun DrawingCanvas(
                             picture = picture,
                             thickness = thickness,
                             color = actualColor,
+                            penStyle = strokePenStyle,
                             minX = minX, minY = minY, maxX = maxX, maxY = maxY
                         )
                         //find the chunk keys that need to be updated
@@ -1354,6 +1400,7 @@ fun DrawingCanvas(
                     arcSmoothing = arcSmoothing,
                     thickness = thickness,
                     color = actualColor,
+                    penStyle = if (currentTool == ActiveTool.IMPORTANT_PEN) PenStyle.SOLID else penStyle,
                     picture = Picture(),
                     minX = 0f,
                     minY = 0f,
@@ -1775,6 +1822,24 @@ fun ColorToolbar(
         Color.Cyan, Color.Magenta, Color(0xFF9C27B0) // Purple
     )
 
+    val scrollState = rememberScrollState()
+    val density = LocalDensity.current
+
+    // Auto-scroll to keep the active color visible when it changes (e.g. on pen style switch).
+    LaunchedEffect(currentColor) {
+        val index = colors.indexOf(currentColor)
+        if (index >= 0) {
+            with(density) {
+                val itemPx = (28.dp + 6.dp).toPx()       // item height + spacing
+                val paddingPx = 6.dp.toPx()               // Column top padding
+                val itemCenterPx = paddingPx + index * itemPx + 14.dp.toPx()
+                val viewportPx = 150.dp.toPx()
+                val target = (itemCenterPx - viewportPx / 2f).coerceAtLeast(0f).toInt()
+                scrollState.animateScrollTo(target)
+            }
+        }
+    }
+
     Surface(
         modifier = modifier
             .width(72.dp)
@@ -1787,7 +1852,7 @@ fun ColorToolbar(
         Column(
             modifier = Modifier
                 .padding(vertical = 6.dp)
-                .verticalScroll(rememberScrollState()),
+                .verticalScroll(scrollState),
             verticalArrangement = Arrangement.spacedBy(6.dp)
         ) {
             colors.forEach { color ->

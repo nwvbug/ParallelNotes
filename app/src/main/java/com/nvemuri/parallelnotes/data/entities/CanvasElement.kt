@@ -8,6 +8,8 @@ import androidx.compose.ui.graphics.toArgb
 import java.util.UUID
 import kotlinx.serialization.Serializable
 
+enum class PenStyle { SOLID, DASHED, HIGHLIGHTER }
+
 sealed interface CanvasElement {
     val id: String
     val zIndex: Float
@@ -41,6 +43,7 @@ data class PenStroke(
     val arcSmoothing: Boolean,  // Whether this stroke was smoothed
     val thickness: Float,
     val color: Color,
+    val penStyle: PenStyle = PenStyle.SOLID,
     override val picture: Picture,
     override val minX: Float,
     override val maxX: Float,
@@ -98,6 +101,7 @@ data class SerializableElement(
     val arcSmoothing: Boolean = false,
     val thickness: Float = 0f,
     val colorArgb: Int = 0,
+    val penStyle: String = "SOLID",
     // Image-specific
     val imagePath: String? = null,
     // Bounding box
@@ -116,6 +120,7 @@ fun CanvasElement.toSerializable(): SerializableElement {
             arcSmoothing = this.arcSmoothing,
             thickness = this.thickness,
             colorArgb = this.color.toArgb(),
+            penStyle = this.penStyle.name,
             minX = this.minX, maxX = this.maxX, minY = this.minY, maxY = this.maxY
         )
         is ImageElement -> SerializableElement(
