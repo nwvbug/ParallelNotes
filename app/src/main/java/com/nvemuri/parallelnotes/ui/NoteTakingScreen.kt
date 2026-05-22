@@ -1725,7 +1725,11 @@ fun DrawingCanvas(
                                 }
                                 false
                             },
-                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.Black, fontSize = 32.sp),
+                        textStyle = androidx.compose.ui.text.TextStyle(
+                            color = Color.Black,
+                            fontSize = 32.sp,
+                            platformStyle = androidx.compose.ui.text.PlatformTextStyle(includeFontPadding = false)
+                        ),
                         visualTransformation = com.nvemuri.parallelnotes.utils.MarkdownVisualTransformation()
                     )
                 } else {
