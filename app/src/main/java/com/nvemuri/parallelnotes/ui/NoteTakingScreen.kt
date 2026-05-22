@@ -92,6 +92,7 @@ import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectDragGestures
 import com.nvemuri.parallelnotes.data.AppDatabase
 import java.util.UUID
 
@@ -221,7 +222,8 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
             ) {
                 Column(
                     modifier = Modifier.padding(12.dp),
-                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
                 ){
                     val isDraw = currentTool == ActiveTool.DRAW
                     IconButton(onClick = {
@@ -308,33 +310,25 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
 
                     // Insert Image Button
                     IconButton(
-                        onClick = { shouldOpenImagePicker = true },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .background(Color.White, CircleShape)
-                            .border(1.dp, Color.Gray, CircleShape)
+                        onClick = { shouldOpenImagePicker = true }
                     ) {
                         Icon(
                             painter = painterResource(id = R.drawable.image_add),
                             contentDescription = "Insert Image",
                             tint = Color.Black,
-                            modifier = Modifier.padding(12.dp)
+                            modifier = Modifier.padding(6.dp)
                         )
                     }
 
                     // Insert Text Box Button
                     IconButton(
-                        onClick = { shouldAddTextBox = true },
-                        modifier = Modifier
-                            .size(56.dp)
-                            .background(Color.White, CircleShape)
-                            .border(1.dp, Color.Gray, CircleShape)
+                        onClick = { shouldAddTextBox = true }
                     ) {
                         Icon(
                             imageVector = Icons.Default.FormatSize,
                             contentDescription = "Add Text Box",
                             tint = Color.Black,
-                            modifier = Modifier.padding(12.dp)
+                            modifier = Modifier.padding(6.dp)
                         )
                     }
 
@@ -711,9 +705,9 @@ fun DrawingCanvas(
             val centerWorldY = (canvasSize.height / 2f - viewportPan.y) / viewportScale
             val element = com.nvemuri.parallelnotes.data.entities.TextElement(
                 text = "Double tap to edit markdown...",
-                minX = centerWorldX - 100f,
+                minX = centerWorldX - 250f,
                 minY = centerWorldY - 50f,
-                displayWidth = 200f,
+                displayWidth = 500f,
                 displayHeight = 100f
             )
             canvasElements = canvasElements + element
@@ -989,6 +983,7 @@ fun DrawingCanvas(
                     }
 
                     //determining what theyre doing if its lasso or there's an active selection to interact with
+                    val isTextOnlySelection = selectedElements.isNotEmpty() && selectedElements.all { it is com.nvemuri.parallelnotes.data.entities.TextElement }
                     if (currentTool == ActiveTool.LASSO || hasSelection) {
                         // Check for resize handle hit (image-only selections, in screen space)
                         val allResizable = selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement || it is com.nvemuri.parallelnotes.data.entities.TextElement }
@@ -1031,7 +1026,7 @@ fun DrawingCanvas(
                             resizePreviewRect = selBounds
                             resizeStartRect = selBounds
                             resizeStartPos = screenToWorld(down.position)
-                        } else if (selectedElements.isNotEmpty() && isPointInPolygon(virtualBrush, lassoPath)) {
+                        } else if (selectedElements.isNotEmpty() && !isTextOnlySelection && isPointInPolygon(virtualBrush, lassoPath)) {
                             // Check if they tapped inside an active selection for dragging
                             isDraggingSelection = true
                             dragLastPosition = virtualBrush
@@ -1039,7 +1034,15 @@ fun DrawingCanvas(
                     }
                     // clear lasso if they tapped outside regardless of what tool is selected
                     // (but not if we just started a resize gesture on a handle)
-                    if (resizingHandle == null && selectedElements.isNotEmpty() && !isPointInPolygon(virtualBrush, lassoPath)) {
+                    val isOutsideSelection = if (isTextOnlySelection) {
+                        val sb = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
+                            Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
+                        }
+                        !sb.contains(virtualBrush)
+                    } else {
+                        !isPointInPolygon(virtualBrush, lassoPath)
+                    }
+                    if (resizingHandle == null && selectedElements.isNotEmpty() && isOutsideSelection) {
 
                         // tapped outside, commit ink back to the chunks
                         if (selectedElements.isNotEmpty()) {
@@ -1268,13 +1271,7 @@ fun DrawingCanvas(
                                     Offset(element.minX, element.maxY),
                                     element.boundingBox.center
                                 ).any { isPointInPolygon(it, lassoPath) }
-                                is com.nvemuri.parallelnotes.data.entities.TextElement -> listOf(
-                                    Offset(element.minX, element.minY),
-                                    Offset(element.maxX, element.minY),
-                                    Offset(element.maxX, element.maxY),
-                                    Offset(element.minX, element.maxY),
-                                    element.boundingBox.center
-                                ).any { isPointInPolygon(it, lassoPath) }
+                                is com.nvemuri.parallelnotes.data.entities.TextElement -> false
                             }
 
                             if (isSelected) {
@@ -1677,18 +1674,9 @@ fun DrawingCanvas(
                     .onSizeChanged { size ->
                         val newHeight = size.height.toFloat()
                         if (kotlin.math.abs(newHeight - textEl.displayHeight) > 1f) {
-                            val isSelected = selectedElements.any { it.id == textEl.id }
                             val updated = textEl.copy(displayHeight = newHeight)
                             canvasElements = canvasElements.map { if (it.id == textEl.id) updated else it }
                             selectedElements = selectedElements.map { if (it.id == textEl.id) updated else it }
-                            if (isSelected) {
-                                lassoPath = listOf(
-                                    Offset(textEl.minX, textEl.minY),
-                                    Offset(textEl.minX + textEl.displayWidth, textEl.minY),
-                                    Offset(textEl.minX + textEl.displayWidth, textEl.minY + newHeight),
-                                    Offset(textEl.minX, textEl.minY + newHeight)
-                                )
-                            }
                         }
                     }
                     .pointerInput(textEl.id) {
@@ -1700,13 +1688,6 @@ fun DrawingCanvas(
                                 if (current != null) {
                                     canvasElements = canvasElements.filterNot { it.id == current.id }
                                     selectedElements = listOf(current)
-                                    val bounds = current.boundingBox
-                                    lassoPath = listOf(
-                                        Offset(bounds.left, bounds.top),
-                                        Offset(bounds.right, bounds.top),
-                                        Offset(bounds.right, bounds.bottom),
-                                        Offset(bounds.left, bounds.bottom)
-                                    )
                                     lassoTotalDx = 0f
                                     lassoTotalDy = 0f
                                 }
@@ -1730,7 +1711,6 @@ fun DrawingCanvas(
                             .fillMaxWidth()
                             .wrapContentHeight(unbounded = true)
                             .background(Color.Transparent)
-                            .border(1.dp, Color.Blue)
                             .onPreviewKeyEvent { event ->
                                 if (event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
                                     val newTextFieldValue = com.nvemuri.parallelnotes.utils.handleTabIndent(textFieldValue, event.isShiftPressed)
@@ -1756,6 +1736,34 @@ fun DrawingCanvas(
                         fontSize = 32.sp
                     )
                 }
+            }
+
+            // Pill drag handle — centered above the text box when in edit mode
+            if (textEl.id == editingTextElementId) {
+                val pillWidthPx = 80f
+                val pillHeightPx = 24f
+                Box(
+                    modifier = Modifier
+                        .offset {
+                            androidx.compose.ui.unit.IntOffset(
+                                (textEl.minX + textEl.displayWidth / 2f - pillWidthPx / 2f).toInt(),
+                                (textEl.minY - pillHeightPx - 10f).toInt()
+                            )
+                        }
+                        .width(with(density) { pillWidthPx.toDp() })
+                        .height(with(density) { pillHeightPx.toDp() })
+                        .background(Color.DarkGray.copy(alpha = 0.7f), RoundedCornerShape(50))
+                        .pointerInput(textEl.id + "_drag") {
+                            detectDragGestures { change, dragAmount ->
+                                change.consume()
+                                selectedElements = selectedElements.map { el ->
+                                    if (el.id == textEl.id) el.translate(dragAmount.x, dragAmount.y) else el
+                                }
+                                lassoTotalDx += dragAmount.x
+                                lassoTotalDy += dragAmount.y
+                            }
+                        }
+                )
             }
         }
     }
