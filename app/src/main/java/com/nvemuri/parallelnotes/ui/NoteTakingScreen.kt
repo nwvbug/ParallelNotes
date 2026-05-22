@@ -15,6 +15,8 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.input.pointer.PointerType
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.filled.FormatSize
+import androidx.compose.material.icons.Icons
 import androidx.compose.material3.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.unit.dp
@@ -44,6 +46,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.foundation.border
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.PathEffect
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 
 import androidx.activity.compose.BackHandler
@@ -88,12 +91,20 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.foundation.gestures.detectTransformGestures
+import androidx.compose.foundation.gestures.detectTapGestures
 import com.nvemuri.parallelnotes.data.AppDatabase
 import java.util.UUID
 
 import android.content.Intent
 import androidx.compose.foundation.verticalScroll
 import androidx.core.content.FileProvider
+import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.input.key.Key
+import androidx.compose.ui.input.key.KeyEventType
+import androidx.compose.ui.input.key.key
+import androidx.compose.ui.input.key.type
+import androidx.compose.ui.input.key.isShiftPressed
+import androidx.compose.ui.unit.sp
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
@@ -170,12 +181,17 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
     // Image insertion trigger
     var shouldOpenImagePicker by remember { mutableStateOf(false) }
 
+    // Text Box insertion trigger
+    var shouldAddTextBox by remember { mutableStateOf(false) }
+
     Box(modifier = Modifier.fillMaxSize()){
         DrawingCanvas(
             currentTool, penThickness, penColor, currentPenStyle, arcSmoothingEnabled, smoothCurrentStroke,
             removeJitterAmount, viewModel,
             shouldOpenImagePicker = shouldOpenImagePicker,
-            onImagePickerConsumed = { shouldOpenImagePicker = false }
+            onImagePickerConsumed = { shouldOpenImagePicker = false },
+            shouldAddTextBox = shouldAddTextBox,
+            onTextBoxConsumed = { shouldAddTextBox = false }
         )
 
         Column (
@@ -292,12 +308,33 @@ fun NoteTakingScreen(viewModel: NoteViewModel, onNavigateHome: () -> Unit){
 
                     // Insert Image Button
                     IconButton(
-                        onClick = { shouldOpenImagePicker = true }
+                        onClick = { shouldOpenImagePicker = true },
+                        modifier = Modifier
+                            .size(56.dp)
+                            .background(Color.White, CircleShape)
+                            .border(1.dp, Color.Gray, CircleShape)
                     ) {
                         Icon(
                             painter = painterResource(id = R.drawable.image_add),
                             contentDescription = "Insert Image",
-                            modifier = Modifier.padding(6.dp)
+                            tint = Color.Black,
+                            modifier = Modifier.padding(12.dp)
+                        )
+                    }
+
+                    // Insert Text Box Button
+                    IconButton(
+                        onClick = { shouldAddTextBox = true },
+                        modifier = Modifier
+                            .size(56.dp)
+                            .background(Color.White, CircleShape)
+                            .border(1.dp, Color.Gray, CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.FormatSize,
+                            contentDescription = "Add Text Box",
+                            tint = Color.Black,
+                            modifier = Modifier.padding(12.dp)
                         )
                     }
 
@@ -521,7 +558,9 @@ fun DrawingCanvas(
     removeJitterAmount: Float,
     viewModel: NoteViewModel,
     shouldOpenImagePicker: Boolean = false,
-    onImagePickerConsumed: () -> Unit = {}
+    onImagePickerConsumed: () -> Unit = {},
+    shouldAddTextBox: Boolean = false,
+    onTextBoxConsumed: () -> Unit = {}
 ) {
     //Bitmap States
     // state integer to force Compose to redraw when we mutate the bitmap
@@ -558,7 +597,7 @@ fun DrawingCanvas(
     var redoStack by remember { mutableStateOf(emptyList<CanvasAction>()) }
     val loadedElements by viewModel.currentElements.collectAsState()
     //Drawing States (Vector)
-    var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) } 
+    var canvasElements by remember { mutableStateOf(emptyList<CanvasElement>()) }
     var currentRawStroke by remember { mutableStateOf(emptyList<Point>())}
 
     //Cursor State
@@ -581,14 +620,14 @@ fun DrawingCanvas(
 
     val selectedImportantCategory by viewModel.selectedImportantCategory.collectAsState()
     val lastProcessedBounds by viewModel.lastProcessedStrokeBounds.collectAsState()
-    
+
     val coroutineScope = rememberCoroutineScope()
 
     // Bounding box confirmation state for Important Pen
     var confirmedBoundingBox by remember { mutableStateOf<Rect?>(null) }
     var confirmedCategoryColor by remember { mutableStateOf<Color?>(null) }
     var boundingBoxJob by remember { mutableStateOf<kotlinx.coroutines.Job?>(null) }
-    
+
     // Track the pending bounds from ViewModel
     var pendingBoundsInfo by remember { mutableStateOf<NoteViewModel.StrokeBoundsInfo?>(null) }
 
@@ -604,6 +643,9 @@ fun DrawingCanvas(
     var resizePreviewRect by remember { mutableStateOf<Rect?>(null) }
     // Original elements captured at start of resize (for undo)
     var resizeOriginalElements by remember { mutableStateOf(emptyList<CanvasElement>()) }
+    // Delta-based resize: anchor point and starting rect
+    var resizeStartPos by remember { mutableStateOf(Offset.Zero) }
+    var resizeStartRect by remember { mutableStateOf<Rect?>(null) }
 
     val context = LocalContext.current
 
@@ -662,7 +704,25 @@ fun DrawingCanvas(
             onImagePickerConsumed()
         }
     }
-    
+
+    LaunchedEffect(shouldAddTextBox) {
+        if (shouldAddTextBox) {
+            val centerWorldX = (canvasSize.width / 2f - viewportPan.x) / viewportScale
+            val centerWorldY = (canvasSize.height / 2f - viewportPan.y) / viewportScale
+            val element = com.nvemuri.parallelnotes.data.entities.TextElement(
+                text = "Double tap to edit markdown...",
+                minX = centerWorldX - 100f,
+                minY = centerWorldY - 50f,
+                displayWidth = 200f,
+                displayHeight = 100f
+            )
+            canvasElements = canvasElements + element
+            undoStack = undoStack + CanvasAction.AddElements(listOf(element))
+            redoStack = emptyList()
+            onTextBoxConsumed()
+        }
+    }
+
     // React to ViewModel's bounds updates
     LaunchedEffect(lastProcessedBounds) {
         lastProcessedBounds?.let { boundsInfo ->
@@ -795,11 +855,25 @@ fun DrawingCanvas(
         }
     }
 
+    var editingTextElementId by remember { mutableStateOf<String?>(null) }
+
     Box(modifier = Modifier.fillMaxSize()) {
         Canvas(
             modifier = Modifier
                 .fillMaxSize()
                 .onSizeChanged { canvasSize = it }
+            .pointerInput(Unit) {
+                // If they tap outside an editing box, close it.
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent()
+                        val change = event.changes.firstOrNull() ?: continue
+                        if (change.pressed && editingTextElementId != null) {
+                            editingTextElementId = null
+                        }
+                    }
+                }
+            }
             .pointerInput(Unit) {
                 detectTransformGestures { centroid, pan, zoom, rotation ->
                     // save the old scale before mutating it
@@ -823,15 +897,15 @@ fun DrawingCanvas(
                 )
             }
             .pointerInput(Unit) {
-                // Long-press on ImageElement to trigger delete menu (finger touch only)
+                // Long-press on ImageElement or TextElement to trigger delete menu (finger touch only)
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     if (down.type != PointerType.Stylus) {
                         val canvasPos = screenToWorld(down.position)
-                        val hitImage = canvasElements.firstOrNull {
-                            it is ImageElement && it.boundingBox.contains(canvasPos)
-                        } as? ImageElement
-                        if (hitImage != null) {
+                        val hitElement = canvasElements.firstOrNull {
+                            (it is ImageElement || it is com.nvemuri.parallelnotes.data.entities.TextElement) && it.boundingBox.contains(canvasPos)
+                        }
+                        if (hitElement != null) {
                             val longPressResult = withTimeoutOrNull(500L) {
                                 // Wait for pointer up or significant movement — either cancels long press
                                 var pressed = true
@@ -845,7 +919,15 @@ fun DrawingCanvas(
                             }
                             if (longPressResult == null) {
                                 // Timeout elapsed = long press confirmed
-                                imageToDelete = hitImage
+                                if (hitElement is ImageElement) {
+                                    imageToDelete = hitElement
+                                } else if (hitElement is com.nvemuri.parallelnotes.data.entities.TextElement) {
+                                    // Instantly delete text elements for now, or show a prompt.
+                                    // Wait, let's just delete it directly since there's no menu.
+                                    canvasElements = canvasElements.filterNot { it.id == hitElement.id }
+                                    undoStack = undoStack + CanvasAction.RemoveElements(listOf(hitElement))
+                                    redoStack = emptyList()
+                                }
                             }
                         }
                     }
@@ -879,7 +961,8 @@ fun DrawingCanvas(
 
                     // check if its a stylus and get pressure
                     val isStylus = down.type == PointerType.Stylus
-                    if (!isStylus && (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN || currentTool == ActiveTool.ERASESTROKE)) return@awaitEachGesture //only take pen for drawing
+                    val hasSelection = selectedElements.isNotEmpty()
+                    if (!isStylus && !hasSelection && (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN || currentTool == ActiveTool.ERASESTROKE)) return@awaitEachGesture //only take pen for drawing
                     val startPressure = down.pressure
 
                     // Streamline stuff (position)
@@ -900,22 +983,26 @@ fun DrawingCanvas(
                     }
 
                     //make a single dot if just tapped
-                    if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
+                    if ((currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) && !hasSelection) {
                         currentRawStroke = listOf(Point(screenToWorld(down.position), startPressure))
 
                     }
 
-                    //determining what theyre doing if its lasso
-                    if (currentTool == ActiveTool.LASSO) {
+                    //determining what theyre doing if its lasso or there's an active selection to interact with
+                    if (currentTool == ActiveTool.LASSO || hasSelection) {
                         // Check for resize handle hit (image-only selections, in screen space)
-                        val allImages = selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement }
-                        val hitHandle: ResizeHandle? = if (allImages) {
+                        val allResizable = selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement || it is com.nvemuri.parallelnotes.data.entities.TextElement }
+                        val hitHandle: ResizeHandle? = if (allResizable) {
                             val selBounds = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
                                 Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
                             }
                             val htl = toScreen(Offset(selBounds.left, selBounds.top))
                             val hbr = toScreen(Offset(selBounds.right, selBounds.bottom))
-                            val handleMap = mapOf(
+                            val isTextOnly = selectedElements.all { it is com.nvemuri.parallelnotes.data.entities.TextElement }
+                            val handleMap = if (isTextOnly) mapOf(
+                                ResizeHandle.L to Offset(htl.x, (htl.y + hbr.y) / 2f),
+                                ResizeHandle.R to Offset(hbr.x, (htl.y + hbr.y) / 2f)
+                            ) else mapOf(
                                 ResizeHandle.TL to htl,
                                 ResizeHandle.T  to Offset((htl.x + hbr.x) / 2f, htl.y),
                                 ResizeHandle.TR to Offset(hbr.x, htl.y),
@@ -932,12 +1019,18 @@ fun DrawingCanvas(
                             // Enter resize mode — decode bitmap now so we only do it once
                             resizingHandle = hitHandle
                             resizeOriginalElements = selectedElements.toList()
-                            val firstImage = selectedElements.first() as ImageElement
-                            resizeBitmap = BitmapFactory.decodeFile(File(context.filesDir, firstImage.imagePath).absolutePath)
+                            val firstElement = selectedElements.first()
+                            if (firstElement is ImageElement) {
+                                resizeBitmap = BitmapFactory.decodeFile(File(context.filesDir, firstElement.imagePath).absolutePath)
+                            } else {
+                                resizeBitmap = null
+                            }
                             val selBounds = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
                                 Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
                             }
                             resizePreviewRect = selBounds
+                            resizeStartRect = selBounds
+                            resizeStartPos = screenToWorld(down.position)
                         } else if (selectedElements.isNotEmpty() && isPointInPolygon(virtualBrush, lassoPath)) {
                             // Check if they tapped inside an active selection for dragging
                             isDraggingSelection = true
@@ -978,6 +1071,7 @@ fun DrawingCanvas(
                             }
                             canvasElements = canvasElements + selectedElements
                             selectedElements = emptyList()
+                            editingTextElementId = null
                         }
                         // Start a fresh lasso path
                         isDraggingSelection = false
@@ -996,7 +1090,7 @@ fun DrawingCanvas(
                         if (change.pressed) {
                             change.consume()
                             val stylusPos = screenToWorld(change.position) //position of actual pointer
-                            if (currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) {
+                            if ((currentTool == ActiveTool.DRAW || currentTool == ActiveTool.IMPORTANT_PEN) && isStylus) {
                                 val movePressure = if (change.type == PointerType.Stylus) change.pressure else 1.0f
 
                                 val currentTime = change.uptimeMillis
@@ -1029,7 +1123,7 @@ fun DrawingCanvas(
                                     )
                                 }
                             }
-                            else if (currentTool == ActiveTool.ERASESTROKE) {
+                            else if (currentTool == ActiveTool.ERASESTROKE && isStylus) {
 
                                 val eraserRadius = 50f
                                 // Create the bounding box for the eraser touch
@@ -1051,6 +1145,7 @@ fun DrawingCanvas(
                                             (it.offset - stylusPos).getDistance() < eraserRadius
                                         }
                                         is ImageElement -> false // images are deleted via long press only
+                                        is com.nvemuri.parallelnotes.data.entities.TextElement -> false // same
                                     }
                                 }
 
@@ -1059,7 +1154,7 @@ fun DrawingCanvas(
                                     canvasElements = canvasElements.filterNot { it in toErase }
                                     undoStack = undoStack + CanvasAction.RemoveElements(toErase)
                                     redoStack = emptyList()
-                                    
+
                                     // Notify ViewModel to remove from important strokes
                                     viewModel.removeImportantStrokes(toErase)
 
@@ -1073,23 +1168,27 @@ fun DrawingCanvas(
                                     rebuildTargetedChunks(canvasElements, dirtyChunkKeys.toList())
                                 }
 
-                            } else if (currentTool == ActiveTool.LASSO) {
+                            } else if (currentTool == ActiveTool.LASSO || selectedElements.isNotEmpty()) {
                                 if (resizingHandle != null) {
-                                    // Resize mode: compute new rect from handle anchor + dragged point
-                                    val prev = resizePreviewRect ?: selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
+                                    // Delta-based resize: apply drag delta to the original rect captured at resize-start.
+                                    // This prevents snapping when the touch lands slightly off the handle corner,
+                                    // and allows the box to grow beyond any initial offset.
+                                    val start = resizeStartRect ?: resizePreviewRect ?: selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
                                         Rect(minOf(acc.left, el.minX), minOf(acc.top, el.minY), maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY))
                                     }
+                                    val dx = stylusPos.x - resizeStartPos.x
+                                    val dy = stylusPos.y - resizeStartPos.y
                                     val minDim = 20f
                                     resizePreviewRect = when (resizingHandle) {
-                                        ResizeHandle.BR -> Rect(prev.left, prev.top, maxOf(prev.left + minDim, stylusPos.x), maxOf(prev.top + minDim, stylusPos.y))
-                                        ResizeHandle.BL -> Rect(minOf(prev.right - minDim, stylusPos.x), prev.top, prev.right, maxOf(prev.top + minDim, stylusPos.y))
-                                        ResizeHandle.TR -> Rect(prev.left, minOf(prev.bottom - minDim, stylusPos.y), maxOf(prev.left + minDim, stylusPos.x), prev.bottom)
-                                        ResizeHandle.TL -> Rect(minOf(prev.right - minDim, stylusPos.x), minOf(prev.bottom - minDim, stylusPos.y), prev.right, prev.bottom)
-                                        ResizeHandle.R  -> Rect(prev.left, prev.top, maxOf(prev.left + minDim, stylusPos.x), prev.bottom)
-                                        ResizeHandle.L  -> Rect(minOf(prev.right - minDim, stylusPos.x), prev.top, prev.right, prev.bottom)
-                                        ResizeHandle.B  -> Rect(prev.left, prev.top, prev.right, maxOf(prev.top + minDim, stylusPos.y))
-                                        ResizeHandle.T  -> Rect(prev.left, minOf(prev.bottom - minDim, stylusPos.y), prev.right, prev.bottom)
-                                        null -> prev
+                                        ResizeHandle.BR -> Rect(start.left, start.top, maxOf(start.left + minDim, start.right + dx), maxOf(start.top + minDim, start.bottom + dy))
+                                        ResizeHandle.BL -> Rect(minOf(start.right - minDim, start.left + dx), start.top, start.right, maxOf(start.top + minDim, start.bottom + dy))
+                                        ResizeHandle.TR -> Rect(start.left, minOf(start.bottom - minDim, start.top + dy), maxOf(start.left + minDim, start.right + dx), start.bottom)
+                                        ResizeHandle.TL -> Rect(minOf(start.right - minDim, start.left + dx), minOf(start.bottom - minDim, start.top + dy), start.right, start.bottom)
+                                        ResizeHandle.R  -> Rect(start.left, start.top, maxOf(start.left + minDim, start.right + dx), start.bottom)
+                                        ResizeHandle.L  -> Rect(minOf(start.right - minDim, start.left + dx), start.top, start.right, start.bottom)
+                                        ResizeHandle.B  -> Rect(start.left, start.top, start.right, maxOf(start.top + minDim, start.bottom + dy))
+                                        ResizeHandle.T  -> Rect(start.left, minOf(start.bottom - minDim, start.top + dy), start.right, start.bottom)
+                                        null -> start
                                     }
                                 } else if (isDraggingSelection) {
                                     // Calculate the distance moved since the last frame
@@ -1109,7 +1208,7 @@ fun DrawingCanvas(
                                     }
 
                                     dragLastPosition = stylusPos
-                                } else {
+                                } else if (currentTool == ActiveTool.LASSO) {
                                     // Just drawing the lasso loop
                                     lassoPath = lassoPath + stylusPos
                                 }
@@ -1121,11 +1220,14 @@ fun DrawingCanvas(
                     if (resizingHandle != null) {
                         val finalRect = resizePreviewRect
                         val bitmap = resizeBitmap
-                        if (finalRect != null && bitmap != null && finalRect.width > 0f && finalRect.height > 0f) {
+                        if (finalRect != null && finalRect.width > 0f && finalRect.height > 0f) {
                             val resized = resizeOriginalElements.map { el ->
-                                if (el is ImageElement) {
+                                if (el is ImageElement && bitmap != null) {
                                     val newPicture = createImagePicture(bitmap, finalRect.width, finalRect.height)
                                     el.copy(minX = finalRect.left, minY = finalRect.top, displayWidth = finalRect.width, displayHeight = finalRect.height, picture = newPicture)
+                                } else if (el is com.nvemuri.parallelnotes.data.entities.TextElement) {
+                                    // Height is auto-managed by content; only update position and width.
+                                    el.copy(minX = finalRect.left, minY = el.minY, displayWidth = finalRect.width)
                                 } else el
                             }
                             // Auto-commit: put resized elements back into canvas and rebuild chunks
@@ -1134,6 +1236,7 @@ fun DrawingCanvas(
                             resized.forEach { dirtyKeys.addAll(getOverlappingChunkKeys(it.boundingBox, CHUNK_SIZE)) }
                             canvasElements = canvasElements + resized
                             selectedElements = emptyList()
+                            editingTextElementId = null
                             lassoPath = emptyList()
                             isDraggingSelection = false
                             lassoTotalDx = 0f
@@ -1146,6 +1249,8 @@ fun DrawingCanvas(
                         resizeBitmap = null
                         resizePreviewRect = null
                         resizeOriginalElements = emptyList()
+                        resizeStartRect = null
+                        resizeStartPos = Offset.Zero
                     }
 
                     // FOR LASSO, CHECK IF THE USER CAPTURED ANYTHING
@@ -1157,6 +1262,13 @@ fun DrawingCanvas(
                             val isSelected = when (element) {
                                 is PenStroke -> element.points.any { isPointInPolygon(it.offset, lassoPath) }
                                 is ImageElement -> listOf(
+                                    Offset(element.minX, element.minY),
+                                    Offset(element.maxX, element.minY),
+                                    Offset(element.maxX, element.maxY),
+                                    Offset(element.minX, element.maxY),
+                                    element.boundingBox.center
+                                ).any { isPointInPolygon(it, lassoPath) }
+                                is com.nvemuri.parallelnotes.data.entities.TextElement -> listOf(
                                     Offset(element.minX, element.minY),
                                     Offset(element.maxX, element.minY),
                                     Offset(element.maxX, element.maxY),
@@ -1334,23 +1446,23 @@ fun DrawingCanvas(
                         canvasElements = canvasElements + newStroke
                         undoStack = undoStack + CanvasAction.AddElements(listOf(newStroke))
                         redoStack = emptyList()
-                        
+
                         if (currentTool == ActiveTool.IMPORTANT_PEN) {
                             viewModel.processImportantStroke(newStroke)
-                            
+
                             // Cancel any existing timer
                             boundingBoxJob?.cancel()
-                            
+
                             // Launch debounce timer
                             boundingBoxJob = coroutineScope.launch {
                                 // Debounce: wait 300ms for user to stop drawing
                                 kotlinx.coroutines.delay(300)
-                                
+
                                 // Use the latest pending bounds (from ViewModel)
                                 pendingBoundsInfo?.let { boundsInfo ->
                                     confirmedBoundingBox = Rect(boundsInfo.minX, boundsInfo.minY, boundsInfo.maxX, boundsInfo.maxY)
                                     confirmedCategoryColor = Color(boundsInfo.colorArgb)
-                                    
+
                                     // Auto-hide after 1 second
                                     kotlinx.coroutines.delay(1000)
                                     confirmedBoundingBox = null
@@ -1419,8 +1531,8 @@ fun DrawingCanvas(
                 }
             }
 
-            //draw the lasso path if it exists
-            if (lassoPath.size > 1) {
+            //draw the lasso path if it exists (only while actively drawing, not when selection is active)
+            if (lassoPath.size > 1 && selectedElements.isEmpty()) {
                 val path = Path().apply {
                     moveTo(lassoPath.first().x, lassoPath.first().y)
                     lassoPath.drop(1).forEach { lineTo(it.x, it.y) }
@@ -1443,7 +1555,7 @@ fun DrawingCanvas(
                 val boxColor = confirmedCategoryColor ?: Color(0xFFFFD700)
                 val threshold = 300f
                 val padding = 8f
-                
+
                 // Draw outer threshold box (shows proximity area)
                 drawRect(
                     color = boxColor.copy(alpha = 0.2f),
@@ -1454,7 +1566,7 @@ fun DrawingCanvas(
                         pathEffect = PathEffect.dashPathEffect(floatArrayOf(20f, 10f), 0f)
                     )
                 )
-                
+
                 // Draw inner bounding box (around actual stroke group with padding)
                 drawRect(
                     color = boxColor,
@@ -1469,7 +1581,7 @@ fun DrawingCanvas(
         // non transformed things
 
         // Resize handles for image-only selections (drawn in screen space for constant visual size)
-        if (selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement }) {
+        if (selectedElements.isNotEmpty() && selectedElements.all { it is ImageElement || it is com.nvemuri.parallelnotes.data.entities.TextElement }) {
             val selBounds = selectedElements.drop(1).fold(selectedElements.first().boundingBox) { acc, el ->
                 Rect(
                     minOf(acc.left, el.minX), minOf(acc.top, el.minY),
@@ -1485,32 +1597,33 @@ fun DrawingCanvas(
             val tr = Offset(br.x, tl.y)
             val bl = Offset(tl.x, br.y)
 
-            // Selection outline
+            // Selection outline — thick black dashes matching app style
             drawRect(
-                color = Color.Blue,
+                color = Color.Black,
                 topLeft = tl,
                 size = Size(br.x - tl.x, br.y - tl.y),
-                style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(10f, 10f), 0f))
+                style = Stroke(width = 4f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(18f, 10f), 0f))
             )
 
-            // Draw resize preview outline during active resize
+            // Resize preview outline during active resize (solid, slightly thicker)
             resizePreviewRect?.let { rect ->
                 val rtl = toScreen(Offset(rect.left, rect.top))
                 val rbr = toScreen(Offset(rect.right, rect.bottom))
                 drawRect(
-                    color = Color.Blue,
+                    color = Color.Black,
                     topLeft = rtl,
                     size = Size(rbr.x - rtl.x, rbr.y - rtl.y),
-                    style = Stroke(width = 2f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(8f, 8f), 0f))
+                    style = Stroke(width = 4f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(18f, 10f), 0f))
                 )
             }
 
-            // 8 handle squares
-            val handleSize = 12f
-            val halfHandle = handleSize / 2f
-            listOf(tl, tm, tr, ml, mr, bl, bm, br).forEach { pos ->
-                drawRect(color = Color.White, topLeft = pos - Offset(halfHandle, halfHandle), size = Size(handleSize, handleSize))
-                drawRect(color = Color.Blue, topLeft = pos - Offset(halfHandle, halfHandle), size = Size(handleSize, handleSize), style = Stroke(1.5f))
+            // Circular handles — text-only selections get only L/R since height is auto-managed
+            val handleRadius = 14f
+            val isTextOnlySelection = selectedElements.all { it is com.nvemuri.parallelnotes.data.entities.TextElement }
+            val handlesToShow = if (isTextOnlySelection) listOf(ml, mr) else listOf(tl, tm, tr, ml, mr, bl, bm, br)
+            handlesToShow.forEach { pos ->
+                drawCircle(color = Color.White, radius = handleRadius, center = pos)
+                drawCircle(color = Color.Black, radius = handleRadius, center = pos, style = Stroke(width = 3.5f))
             }
         }
 
@@ -1539,7 +1652,114 @@ fun DrawingCanvas(
             }
         }
     }
-        
+
+    // Compose Text Element Overlay
+    val allTextElements = (canvasElements + selectedElements).filterIsInstance<com.nvemuri.parallelnotes.data.entities.TextElement>()
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .graphicsLayer {
+                translationX = viewportPan.x
+                translationY = viewportPan.y
+                scaleX = viewportScale
+                scaleY = viewportScale
+                transformOrigin = androidx.compose.ui.graphics.TransformOrigin(0f, 0f)
+            }
+    ) {
+        allTextElements.forEach { textEl ->
+            val density = androidx.compose.ui.platform.LocalDensity.current
+            Box(
+                modifier = Modifier
+                    .offset { androidx.compose.ui.unit.IntOffset(textEl.minX.toInt(), textEl.minY.toInt()) }
+                    .width(with(density) { textEl.displayWidth.toDp() })
+                    .wrapContentHeight(unbounded = true)
+                    .onSizeChanged { size ->
+                        val newHeight = size.height.toFloat()
+                        if (kotlin.math.abs(newHeight - textEl.displayHeight) > 1f) {
+                            val isSelected = selectedElements.any { it.id == textEl.id }
+                            val updated = textEl.copy(displayHeight = newHeight)
+                            canvasElements = canvasElements.map { if (it.id == textEl.id) updated else it }
+                            selectedElements = selectedElements.map { if (it.id == textEl.id) updated else it }
+                            if (isSelected) {
+                                lassoPath = listOf(
+                                    Offset(textEl.minX, textEl.minY),
+                                    Offset(textEl.minX + textEl.displayWidth, textEl.minY),
+                                    Offset(textEl.minX + textEl.displayWidth, textEl.minY + newHeight),
+                                    Offset(textEl.minX, textEl.minY + newHeight)
+                                )
+                            }
+                        }
+                    }
+                    .pointerInput(textEl.id) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                editingTextElementId = textEl.id
+                                // Move element into selectedElements so resize/drag handles appear
+                                val current = canvasElements.firstOrNull { it.id == textEl.id }
+                                if (current != null) {
+                                    canvasElements = canvasElements.filterNot { it.id == current.id }
+                                    selectedElements = listOf(current)
+                                    val bounds = current.boundingBox
+                                    lassoPath = listOf(
+                                        Offset(bounds.left, bounds.top),
+                                        Offset(bounds.right, bounds.top),
+                                        Offset(bounds.right, bounds.bottom),
+                                        Offset(bounds.left, bounds.bottom)
+                                    )
+                                    lassoTotalDx = 0f
+                                    lassoTotalDy = 0f
+                                }
+                            }
+                        )
+                    }
+            ) {
+                if (editingTextElementId == textEl.id) {
+                    var textFieldValue by remember(textEl.id) { mutableStateOf(androidx.compose.ui.text.input.TextFieldValue(textEl.text)) }
+                    androidx.compose.foundation.text.BasicTextField(
+                        value = textFieldValue,
+                        onValueChange = { newValue ->
+                            val processedValue = com.nvemuri.parallelnotes.utils.handleMarkdownTextEdit(textFieldValue, newValue)
+                            textFieldValue = processedValue
+                            val updated = textEl.copy(text = processedValue.text)
+                            canvasElements = canvasElements.map { if (it.id == textEl.id) updated else it }
+                            selectedElements = selectedElements.map { if (it.id == textEl.id) updated else it }
+                            viewModel.updateCurrentElements(canvasElements)
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .wrapContentHeight(unbounded = true)
+                            .background(Color.Transparent)
+                            .border(1.dp, Color.Blue)
+                            .onPreviewKeyEvent { event ->
+                                if (event.key == Key.Tab && event.type == KeyEventType.KeyDown) {
+                                    val newTextFieldValue = com.nvemuri.parallelnotes.utils.handleTabIndent(textFieldValue, event.isShiftPressed)
+                                    if (newTextFieldValue != null) {
+                                        textFieldValue = newTextFieldValue
+                                        val updated = textEl.copy(text = newTextFieldValue.text)
+                                        canvasElements = canvasElements.map { if (it.id == textEl.id) updated else it }
+                                        selectedElements = selectedElements.map { if (it.id == textEl.id) updated else it }
+                                        viewModel.updateCurrentElements(canvasElements)
+                                        return@onPreviewKeyEvent true
+                                    }
+                                }
+                                false
+                            },
+                        textStyle = androidx.compose.ui.text.TextStyle(color = Color.Black, fontSize = 32.sp),
+                        visualTransformation = com.nvemuri.parallelnotes.utils.MarkdownVisualTransformation()
+                    )
+                } else {
+                    dev.jeziellago.compose.markdowntext.MarkdownText(
+                        markdown = textEl.text,
+                        modifier = Modifier.fillMaxWidth().wrapContentHeight(unbounded = true).background(Color.Transparent).padding(4.dp),
+                        color = Color.Black,
+                        fontSize = 32.sp
+                    )
+                }
+            }
+        }
+    }
+
     AnimatedVisibility(
         visible = feedbackMessage != null,
         enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 }),
@@ -1602,7 +1822,7 @@ fun ImportantPenMenu(viewModel: NoteViewModel) {
         Column(modifier = Modifier.padding(16.dp)) {
             Text("Categories", fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
-            
+
             // Default "Important" category (pseudo-category)
             Row(
                 modifier = Modifier
@@ -1707,7 +1927,8 @@ fun PenCustomizationPanel(
         border = BorderStroke(3.dp, Color.Black),
         color = Color.White,
         shadowElevation = 8.dp,
-        modifier = Modifier.padding(start = 16.dp) // Space between toolbar and menu
+        modifier = Modifier.padding(start = 16.dp) // Space between toolbar and menu[p
+
     ) {
         Row(modifier = Modifier.padding(24.dp)) {
 

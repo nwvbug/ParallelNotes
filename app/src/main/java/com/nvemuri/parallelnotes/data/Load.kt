@@ -249,6 +249,19 @@ fun SerializableElement.toCanvasElement(context: Context): CanvasElement {
                 picture = picture
             )
         }
+        "TEXT" -> {
+            val textContent = requireNotNull(text) { "TextElement missing text content" }
+            val w = displayWidth ?: (maxX - minX).coerceAtLeast(100f)
+            val h = displayHeight ?: (maxY - minY).coerceAtLeast(50f)
+            com.nvemuri.parallelnotes.data.entities.TextElement(
+                id = id,
+                zIndex = zIndex,
+                text = textContent,
+                minX = minX, minY = minY,
+                displayWidth = w, displayHeight = h,
+                picture = Picture()
+            )
+        }
         else -> throw IllegalArgumentException("Unknown type: $type")
     }
 }

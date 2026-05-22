@@ -83,6 +83,21 @@ data class ImageElement(
     override fun translate(dx: Float, dy: Float) = copy(minX = minX + dx, minY = minY + dy)
 }
 
+data class TextElement(
+    override val id: String = UUID.randomUUID().toString(),
+    override val zIndex: Float = 1.0f,
+    val text: String,
+    override val minX: Float,
+    override val minY: Float,
+    val displayWidth: Float,
+    val displayHeight: Float,
+    override val picture: Picture = Picture(), // Compose handles rendering
+) : CanvasElement {
+    override val maxX: Float get() = minX + displayWidth
+    override val maxY: Float get() = minY + displayHeight
+    override fun translate(dx: Float, dy: Float) = copy(minX = minX + dx, minY = minY + dy)
+}
+
 @Serializable
 data class SerializablePoint(
     val x: Float,
@@ -104,6 +119,10 @@ data class SerializableElement(
     val penStyle: String = "SOLID",
     // Image-specific
     val imagePath: String? = null,
+    // Text-specific
+    val text: String? = null,
+    val displayWidth: Float? = null,
+    val displayHeight: Float? = null,
     // Bounding box
     val minX: Float, val maxX: Float, val minY: Float, val maxY: Float
 )
@@ -128,6 +147,15 @@ fun CanvasElement.toSerializable(): SerializableElement {
             zIndex = this.zIndex,
             type = "IMAGE",
             imagePath = this.imagePath,
+            minX = this.minX, maxX = this.maxX, minY = this.minY, maxY = this.maxY
+        )
+        is TextElement -> SerializableElement(
+            id = this.id,
+            zIndex = this.zIndex,
+            type = "TEXT",
+            text = this.text,
+            displayWidth = this.displayWidth,
+            displayHeight = this.displayHeight,
             minX = this.minX, maxX = this.maxX, minY = this.minY, maxY = this.maxY
         )
         else -> throw IllegalArgumentException("Unknown element type")

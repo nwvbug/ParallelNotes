@@ -30,6 +30,7 @@ import com.nvemuri.parallelnotes.data.ImportantCategoryDao
 import com.nvemuri.parallelnotes.data.entities.ImportantStrokeEntity
 import com.nvemuri.parallelnotes.data.entities.ImportantCategoryEntity
 import com.nvemuri.parallelnotes.data.entities.ImageElement
+import com.nvemuri.parallelnotes.data.entities.TextElement
 import com.nvemuri.parallelnotes.data.entities.SerializableElement
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import java.io.File
@@ -474,6 +475,13 @@ class NoteViewModel(
                 // while preserving visible variation (each level = 12.5% change)
                 val pressureLevels = 8
 
+                // Build once for all TextElements
+                val markwon = buildMarkwonForPdf(context)
+                val textPaint = android.text.TextPaint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply {
+                    textSize = 32f * context.resources.displayMetrics.scaledDensity
+                    color = android.graphics.Color.BLACK
+                }
+
                 // Draw in z-order so images and strokes layer correctly
                 elements.sortedBy { it.zIndex }.forEach { element ->
                     when (element) {
@@ -540,6 +548,17 @@ class NoteViewModel(
                                 }
                             }
                         }
+                        is TextElement -> {
+                            val spanned = markwon.toMarkdown(element.text)
+                            val layout = android.text.StaticLayout.Builder
+                                .obtain(spanned, 0, spanned.length, textPaint, element.displayWidth.toInt().coerceAtLeast(1))
+                                .setAlignment(android.text.Layout.Alignment.ALIGN_NORMAL)
+                                .build()
+                            canvas.save()
+                            canvas.translate(element.minX, element.minY)
+                            layout.draw(canvas)
+                            canvas.restore()
+                        }
                         else -> { /* unknown element type */ }
                     }
                 }
@@ -570,6 +589,11 @@ class NoteViewModel(
 }
 
 
+
+private fun buildMarkwonForPdf(context: Context): io.noties.markwon.Markwon =
+    io.noties.markwon.Markwon.builder(context)
+        .usePlugin(io.noties.markwon.ext.strikethrough.StrikethroughPlugin.create())
+        .build()
 
 class NoteViewModelFactory(
     private val context: Context,
