@@ -1585,8 +1585,10 @@ fun DrawingCanvas(
                     maxOf(acc.right, el.maxX), maxOf(acc.bottom, el.maxY)
                 )
             }
-            val tl = toScreen(Offset(selBounds.left, selBounds.top))
-            val br = toScreen(Offset(selBounds.right, selBounds.bottom))
+            // During active resize, use the live preview rect so handles track the drag
+            val displayBounds = if (resizingHandle != null && resizePreviewRect != null) resizePreviewRect!! else selBounds
+            val tl = toScreen(Offset(displayBounds.left, displayBounds.top))
+            val br = toScreen(Offset(displayBounds.right, displayBounds.bottom))
             val tm = Offset((tl.x + br.x) / 2f, tl.y)
             val bm = Offset((tl.x + br.x) / 2f, br.y)
             val ml = Offset(tl.x, (tl.y + br.y) / 2f)
@@ -1594,25 +1596,13 @@ fun DrawingCanvas(
             val tr = Offset(br.x, tl.y)
             val bl = Offset(tl.x, br.y)
 
-            // Selection outline — thick black dashes matching app style
+            // Selection outline
             drawRect(
                 color = Color.Black,
                 topLeft = tl,
                 size = Size(br.x - tl.x, br.y - tl.y),
                 style = Stroke(width = 4f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(18f, 10f), 0f))
             )
-
-            // Resize preview outline during active resize (solid, slightly thicker)
-            resizePreviewRect?.let { rect ->
-                val rtl = toScreen(Offset(rect.left, rect.top))
-                val rbr = toScreen(Offset(rect.right, rect.bottom))
-                drawRect(
-                    color = Color.Black,
-                    topLeft = rtl,
-                    size = Size(rbr.x - rtl.x, rbr.y - rtl.y),
-                    style = Stroke(width = 4f, pathEffect = PathEffect.dashPathEffect(floatArrayOf(18f, 10f), 0f))
-                )
-            }
 
             // Circular handles — text-only selections get only L/R since height is auto-managed
             val handleRadius = 14f
@@ -1666,10 +1656,16 @@ fun DrawingCanvas(
     ) {
         allTextElements.forEach { textEl ->
             val density = androidx.compose.ui.platform.LocalDensity.current
+            // During an active resize drag, use the live preview rect so text reflows immediately
+            val activeResize = resizingHandle != null && resizePreviewRect != null && resizeOriginalElements.any { it.id == textEl.id }
+            val renderMinX = if (activeResize) resizePreviewRect!!.left else textEl.minX
+            val renderWidth = if (activeResize) resizePreviewRect!!.width else textEl.displayWidth
             Box(
                 modifier = Modifier
-                    .offset { androidx.compose.ui.unit.IntOffset(textEl.minX.toInt(), textEl.minY.toInt()) }
-                    .width(with(density) { textEl.displayWidth.toDp() })
+                    .offset { androidx.compose.ui.unit.IntOffset(renderMinX.toInt(), textEl.minY.toInt()) }
+                    // requiredWidth (not width) so the box can exceed the screen-width
+                    // constraint and stay in sync with the canvas-drawn selection bounds.
+                    .requiredWidth(with(density) { renderWidth.toDp() })
                     .wrapContentHeight(unbounded = true)
                     .onSizeChanged { size ->
                         val newHeight = size.height.toFloat()

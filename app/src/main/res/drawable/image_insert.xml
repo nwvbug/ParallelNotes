@@ -1,0 +1,28 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="86dp"
+    android:height="86dp"
+    android:viewportWidth="86"
+    android:viewportHeight="86">
+  <!-- Frame / border of image -->
+  <path
+      android:pathData="M8,8 L78,8 L78,70 L8,70 Z"
+      android:strokeWidth="6"
+      android:fillColor="#00000000"
+      android:strokeColor="#000000"
+      android:strokeLineCap="round"
+      android:strokeLineJoin="round"/>
+  <!-- Mountain / landscape shape inside -->
+  <path
+      android:pathData="M8,55 L28,32 L46,48 L58,36 L78,55 Z"
+      android:fillColor="#000000"/>
+  <!-- Sun circle -->
+  <path
+      android:pathData="M58,24 m-8,0 a8,8 0 1,0 16,0 a8,8 0 1,0 -16,0"
+      android:fillColor="#000000"/>
+  <!-- Plus sign for "insert" -->
+  <path
+      android:pathData="M43,76 L43,86 M38,81 L48,81"
+      android:strokeWidth="5"
+      android:strokeColor="#000000"
+      android:strokeLineCap="round"/>
+</vector>
