@@ -825,9 +825,15 @@ fun DrawingCanvas(
             rebuildTargetedChunks(canvasElements, dirtyChunkKeys.toList())
         }
     }
-    LaunchedEffect(canvasElements) {
-        viewModel.updateCurrentElements(canvasElements)
+    // Keep the ViewModel in sync with everything on the canvas, including elements
+    // temporarily lifted into selectedElements (a text box being edited, or a lasso
+    // selection). Without this, leaving the screen mid-edit saves a list missing those
+    // elements and the in-progress work is lost.
+    LaunchedEffect(canvasElements, selectedElements) {
+        viewModel.updateCurrentElements(canvasElements + selectedElements)
+    }
 
+    LaunchedEffect(canvasElements) {
         // If we just loaded an existing note (elements exist but chunks don't yet), build the chunks!
         if (canvasElements.isNotEmpty() && activeChunks.isEmpty()) {
             val allKeys = mutableSetOf<String>()
@@ -1701,7 +1707,7 @@ fun DrawingCanvas(
                             val updated = textEl.copy(text = processedValue.text)
                             canvasElements = canvasElements.map { if (it.id == textEl.id) updated else it }
                             selectedElements = selectedElements.map { if (it.id == textEl.id) updated else it }
-                            viewModel.updateCurrentElements(canvasElements)
+                            viewModel.updateCurrentElements(canvasElements + selectedElements)
                         },
                         modifier = Modifier
                             .fillMaxWidth()
@@ -1715,7 +1721,7 @@ fun DrawingCanvas(
                                         val updated = textEl.copy(text = newTextFieldValue.text)
                                         canvasElements = canvasElements.map { if (it.id == textEl.id) updated else it }
                                         selectedElements = selectedElements.map { if (it.id == textEl.id) updated else it }
-                                        viewModel.updateCurrentElements(canvasElements)
+                                        viewModel.updateCurrentElements(canvasElements + selectedElements)
                                         return@onPreviewKeyEvent true
                                     }
                                 }
